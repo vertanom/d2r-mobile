@@ -28,7 +28,7 @@
 
 enum { DM_PADBIND_N = 16, DM_PADBIND_COMBOS = 32, DM_PADBIND_TAP_MS = 80, DM_PADBIND_CHORD_MS = 120 };   // 实体键 = 原版键位位 0–15（A B X Y LS RS L R ZL ZR + − ← ↑ → ↓）；组合最多 32 条；修饰键单按补发的毫秒；修饰键等组合的毫秒 | Physical buttons = original button bits 0-15; at most 32 combos; milliseconds a lone modifier tap is sent; milliseconds a modifier waits for a combo
 // 宿主动作：输出的位 48 起（实体手柄只有 0–15，前端自用位不进表的输出） | Host actions: output bits from 48 (the physical controller only has 0-15; the front end's own bits never appear in table outputs)
-enum { DM_PADBIND_ACT0 = 48, DM_PADBIND_NACT = 10 };
+enum { DM_PADBIND_ACT0 = 48, DM_PADBIND_NACT = 12 };
 #define DM_PADACT_MAPSIZE (1ull << 48)      // 地图：全屏 ↔ 小地图（dm_ui_map_full） | map: fullscreen <-> minimap (dm_ui_map_full)
 #define DM_PADACT_TOWNPORTAL (1ull << 49)   // 免费回城（dm_tp_request） | free town portal (dm_tp_request)
 #define DM_PADACT_MAPPOS (1ull << 50)       // 小地图放左 ↔ 放右（dm_ui_map_pos_toggle） | minimap left <-> right (dm_ui_map_pos_toggle)
@@ -39,6 +39,8 @@ enum { DM_PADBIND_ACT0 = 48, DM_PADBIND_NACT = 10 };
 #define DM_PADACT_MAPUP (1ull << 55)
 #define DM_PADACT_MAPDOWN (1ull << 56)
 #define DM_PADACT_MAPCENTER (1ull << 57)    // 平移归零（dm_ui_map_pan_reset） | reset panning (dm_ui_map_pan_reset)
+#define DM_PADACT_FREEAIM (1ull << 58)      // 按住 = 自由瞄准（PC 的 Shift：表里的技能不选怪，朝左摇杆方向放，hle_private_aim.c） | held = free aim (the PC's Shift: listed skills pick no monster and go the left stick's way, hle_private_aim.c)
+#define DM_PADACT_FREEAIMTOGGLE (1ull << 59)   // 自由瞄准开 ↔ 关 | free aim on <-> off
 #define DM_PADACT_ALL (((1ull << DM_PADBIND_NACT) - 1) << DM_PADBIND_ACT0)
 typedef struct { uint64_t mods; int btn; uint64_t out; } dm_padbind_combo;   // 按着 mods 的全部再按 btn → out | holding all of mods and pressing btn -> out
 typedef struct { uint64_t out[DM_PADBIND_N]; int stage_ms; int ncombo; dm_padbind_combo combo[DM_PADBIND_COMBOS]; } dm_padbind_table;   // stage_ms：分段毫秒（0 = 不分段） | stage_ms: staging milliseconds (0 = no staging)
@@ -47,7 +49,7 @@ typedef struct { uint64_t out[DM_PADBIND_N]; int stage_ms; int ncombo; dm_padbin
 typedef struct { uint64_t held, ignore, latch[DM_PADBIND_N], t_down[DM_PADBIND_N], t_up[DM_PADBIND_N], tail, pend, used, tap, fired, acts; } dm_padbind_state;
 
 static const char *const dm_padbind_names[DM_PADBIND_N] = { "A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN" };
-static const char *const dm_padbind_act_names[DM_PADBIND_NACT] = { "MAPSIZE", "TOWNPORTAL", "MAPPOS", "MAPZOOMIN", "MAPZOOMOUT", "MAPLEFT", "MAPRIGHT", "MAPUP", "MAPDOWN", "MAPCENTER" };
+static const char *const dm_padbind_act_names[DM_PADBIND_NACT] = { "MAPSIZE", "TOWNPORTAL", "MAPPOS", "MAPZOOMIN", "MAPZOOMOUT", "MAPLEFT", "MAPRIGHT", "MAPUP", "MAPDOWN", "MAPCENTER", "FREEAIM", "FREEAIMTOGGLE" };
 
 static inline void dm_padbind_identity(dm_padbind_table *t) { memset(t, 0, sizeof *t); for (int i = 0; i < DM_PADBIND_N; i++) t->out[i] = 1ull << i; }
 static inline int dm_padbind_is_identity(const dm_padbind_table *t) { for (int i = 0; i < DM_PADBIND_N; i++) if (t->out[i] != 1ull << i) return 0; return !t->ncombo; }

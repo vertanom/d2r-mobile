@@ -25,6 +25,8 @@ int dm_private_aim_vector(int32_t rx,int32_t ry,float out[2]) {
 #ifndef DM_PRIVATE_AIM_VECTOR_ONLY
 #include "dm.h"
 #include "dm_input.h"
+#include "dm_aim.h"
+#include "dm_custom.h"
 #include <mach/mach.h>
 static int read_live(uint64_t a,void *out,size_t n) {
     vm_size_t copied=0;
@@ -54,8 +56,35 @@ static void cone_restore(void) {
 // Called every frame at the controller read (hle_hid.c): once the right stick returns to zero, restore the two places that were changed (when there is no further cast after the drag ends, the designated target must not be left in the slot)
 void dm_aim_cone_pump(void) {
     if (!atomic_load(&g_cone_set)) return; int32_t rx = 0, ry = 0; dm_input_sampled_right(&rx, &ry);
-    if (!(getenv("DM_TEST_AIM") || getenv("DM_TEST_AIM_AT")) && !rx && !ry) { cone_restore(); return; }
+    if (!(getenv("DM_TEST_AIM") || getenv("DM_TEST_AIM_AT")) && !rx && !ry && !dm_aim_free_on()) { cone_restore(); return; }   // 自由瞄准开着时不恢复：右摇杆本来就不动 | not restored while free aim is on: the right stick is not moved then anyway
 }
+// ---- 自由瞄准（PC 按住 Shift 放技能 = 不选怪、朝方向放）：手柄键位的宿主动作 FREEAIM（按住）/ FREEAIMTOGGLE（开关），dm_gamepad.m 调 dm_aim_free_set ----
+// 生效时表里的技能（aim_free.txt，缺省 = 位移类，见 dm_aim.h）：不走锥内选怪，指定目标槽清零、alwaysIgnoreTarget 置 1（同上面「锥内没怪」那条已实测的路），方向取左摇杆。
+// 测试开关 DM_TEST_FREEAIM=1 = 一直开着（按键脚本没有宿主动作）
+// ---- Free aim (the PC's hold-Shift cast = pick no monster, cast by direction): the controller remap host actions FREEAIM (held) / FREEAIMTOGGLE (on/off), dm_gamepad.m calls dm_aim_free_set ----
+// While in effect the listed skills (aim_free.txt, default = movement, see dm_aim.h) skip the cone pick, clear the designated target slot and set alwaysIgnoreTarget to 1 (the same path as "no monster in the cone" above, already measured), with the direction taken from the left stick.
+// Test switch DM_TEST_FREEAIM=1 = always on (the key script has no host actions)
+static _Atomic int g_free_hold, g_free_toggle;
+void dm_aim_free_set(int hold, int toggle_edge) {
+    atomic_store(&g_free_hold, hold != 0);
+    if (toggle_edge) { int on = !atomic_fetch_xor(&g_free_toggle, 1); LOG("自由瞄准：切换 → %s", on ? "开" : "关"); }
+}
+int dm_aim_free_on(void) { static int t = -1; if (t < 0) t = getenv("DM_TEST_FREEAIM") != NULL; return t || atomic_load(&g_free_hold) || atomic_load(&g_free_toggle); }
+// aim_free.txt（自定义目录，键=值，# 注释）：move / zone / shot = 类别开关，skill_<号> = 单个技能。整份缓存、2 秒重读一次（按住连放每拍都要查）
+// aim_free.txt (custom directory, key=value, # comments): move / zone / shot = class switches, skill_<id> = a single skill. Cached whole, re-read every 2 seconds (a held recast asks every tick)
+static char g_free_txt[2048]; static uint64_t g_free_txt_ns;
+static int free_get(const char *key, int def) {
+    uint64_t t = now_ns(); if (!g_free_txt_ns || t - g_free_txt_ns > 2000000000ull) { g_free_txt_ns = t; g_free_txt[0] = 0; const char *d = dm_custom_dir(); char p[1100];
+        if (d) { snprintf(p, sizeof p, "%s/aim_free.txt", d); FILE *f = fopen(p, "r"); if (f) { size_t n = fread(g_free_txt, 1, sizeof g_free_txt - 1, f); g_free_txt[n] = 0; fclose(f); } } }
+    size_t kn = strlen(key); int v = def;
+    for (const char *l = g_free_txt; *l; ) { const char *e = strchr(l, '\n'); if (!e) e = l + strlen(l);
+        while (l < e && (*l == ' ' || *l == '\t')) l++;
+        if (*l != '#' && (size_t)(e - l) > kn && !strncmp(l, key, kn)) { const char *q = l + kn; while (q < e && (*q == ' ' || *q == '\t')) q++; if (q < e && *q == '=') v = atoi(q + 1); }
+        l = *e ? e + 1 : e; }
+    return v;
+}
+// 测试开关 DM_TEST_AIM_FRAC=<0–1>：位移 / 落点类的方向乘这个比例，看落点是否跟着缩短（离线验证「方向不归一化、距离 = 方向 × 射程」对服务端也成立） | Test switch DM_TEST_AIM_FRAC=<0-1>: the direction of movement / ground zone skills is multiplied by this fraction, to see whether the landing point shortens with it (checks that "direction is not normalized, distance = direction × range" also holds on the server)
+static float test_frac(void) { static float f = -1; if (f < 0) { const char *e = getenv("DM_TEST_AIM_FRAC"); f = e ? (float)atof(e) : 1.0f; if (!(f >= 0 && f <= 1)) f = 1.0f; } return f; }
 // 在客户端单位表里找手指方向锥内的怪：类别 1（main+0x2f7b7c）、可选中（0x464a70）、22 格内、夹角余弦 ≥ 门槛；取夹角最小的。out_n = 22 格内的怪总数（日志用）
 // 测试：DM_TEST_AIM_DROP=<n>——同一只被锁满 n 次施放后当它死了（从候选里剔掉），看下一次施放换谁。真死亡走的是同一个剔除（模式 0 / 12、不可选中）
 // Find a monster inside the finger direction cone in the client unit table: category 1 (main+0x2f7b7c), selectable (0x464a70), within 22 cells, cosine of the angle ≥ threshold; take the one with the smallest angle. out_n = total number of monsters within 22 cells (for logging)
@@ -112,9 +141,9 @@ void svc_private_skill_aim(uint64_t *regs) {
     int32_t rx=0,ry=0;dm_input_sampled_right(&rx,&ry);
     { const char *t=getenv("DM_TEST_AIM");if(t)sscanf(t,"%d,%d",&rx,&ry); }   // 测试：顶替右摇杆采样（宿主按键脚本没有右摇杆伪键） | test: stands in for right stick sampling (the host key script has no right stick pseudo-keys)
     { float p0[2]={position[0],position[1]}; cone_test_dir(m,regs[1],p0,&rx,&ry); }
-    float vec[2],original[2]={direction[0],direction[1]};int active=dm_private_aim_vector(rx,ry,vec);
-    if(!active && atomic_load(&g_cone_set))cone_restore();   // 不拖 = 原生 | no drag = native
-    if(active) {
+    float vec[2],original[2]={direction[0],direction[1]};int active=dm_private_aim_vector(rx,ry,vec),fr=dm_aim_free_on();
+    if(!active && !fr && atomic_load(&g_cone_set))cone_restore();   // 不拖、没开自由瞄准 = 原生 | no drag and no free aim = native
+    if(active || fr) {
         // 目标点 = 位置 + 方向 × 射程（游戏在 0x2fac70 里乘，射程取自 0x2b5c70），再取整到格。近战类射程只有 2–4 格，取整后方向只剩 8 个档（斜向吸到格子边）；
         // 落点距离无所谓的技能把方向放大，让目标点落到 24 格外（目标格相对角色真实位置的取整误差 ≤1.7°；按整数格差量、不计角色站位小数时 ≤3°——16 格时真机按格差量到正上 / 正下各偏 5°）。实测（圣骑普通攻击，目标点 12 格外按住 4 发）：人原地挥砍、不走动。射程更大的技能落点有意义，不动
         // Target point = position + direction × range (the game multiplies in 0x2fac70, range comes from 0x2b5c70), then rounded to a cell. Melee-type range is only 2–4 cells, after rounding only 8 direction steps remain (diagonals snap to cell edges);
@@ -135,24 +164,33 @@ void svc_private_skill_aim(uint64_t *regs) {
         typedef uint64_t (*Rec)(uint64_t,int32_t);
         int32_t sk=-1;read_live(regs[23]+(uint64_t)(uint32_t)regs[25]*0xb8+0xd4c,&sk,4);
         uint64_t mg=((Mgr)(m->base+0x2acecc))(),rec=sk>=0?((Rec)(m->base+0x2b4bc8))(mg,sk):0;
-        float dist=0.0f;uint8_t scaled=1,ver=0;uint16_t fn=0;int far=0;
-        if(rec && read_live(rec+8,&dist,4) && read_live(rec+0x10,&scaled,1) && dist>0.0f && dist<=2.0f && !scaled && read_live(regs[1]+0x1bd,&ver,1) && ver>=1 && ver<=3) {
+        // 类别（dm_aim.h）：施放函数号取不到的一律 NONE（不放远、不进自由瞄准），与原先「取不到记录的一律不放远」一致 | Class (dm_aim.h): anything whose cast function cannot be read is NONE (not pushed far, no free aim), consistent with the former "anything whose record cannot be fetched is not pushed far"
+        float dist=0.0f;uint8_t scaled=1,ver=0;uint16_t fn=0;int cls=DM_AIM_NONE;
+        if(rec && read_live(rec+8,&dist,4) && read_live(rec+0x10,&scaled,1) && read_live(regs[1]+0x1bd,&ver,1) && ver>=1 && ver<=3) {
             uint64_t tbl=0,base=0,cnt=0;
             if(read_live((uint64_t)m->base+0x2d64a18+(uint64_t)ver*16,&tbl,8) && read_live(tbl+0x11e8,&base,8) && read_live(tbl+0x11f0,&cnt,8) && (uint64_t)sk<cnt &&
-               read_live(base+(uint64_t)sk*0x2ec+0x4e,&fn,2)) far=!(fn==27||fn==52||fn==67||fn==76||fn==77||fn==78);
+               read_live(base+(uint64_t)sk*0x2ec+0x4e,&fn,2)) cls=dm_aim_class(fn,dist,scaled);
         }
-        float rg=((Range)(m->base+0x2b5c70))(mg,regs[1],0),k=(far && rg>0.0f && isfinite(rg))?24.0f/rg:1.0f;
-        { static int lg; if(getenv("DM_SKILL_AIM_LOG") && lg++<12)LOG("瞄准适配：技能号 %d 手柄落点距离 %.2f 施放函数 %u 射程 %.2f 放大 %.1f",sk,dist,fn,rg,k); }
-        direction[0]=vec[0]*k;direction[1]=vec[1]*k;
-        if(cone_cos()<=1.0f) {   // 手指方向选目标 | target selection by finger direction
-            cone_restore(); int nmon=0; float bc=0; float p0[2]={position[0],position[1]};
-            uint64_t tgt=cone_pick(m,regs[1],p0,vec,cone_cos(),&nmon,&bc);
-            if(tgt){ *(uint64_t *)(mg+0xd10)=tgt; g_cone_slot_mgr=mg; }
-            else if(rec){ g_cone_rec=rec; g_cone_rec_was=*(uint8_t *)(rec+0x18); *(uint8_t *)(rec+0x18)=1; }
-            { static int dn=-1; static uint32_t lid, cnt; if(dn<0){ const char *e=getenv("DM_TEST_AIM_DROP"); dn=e?atoi(e):0; } if(dn>0&&tgt){ uint32_t id=*(uint32_t *)(tgt+8); cnt=id==lid?cnt+1:1; lid=id; if(cnt>=(uint32_t)dn&&g_cone_ndrop<8){ g_cone_dropped[g_cone_ndrop++]=id; LOG("瞄准测试：id %u 被锁满 %d 次，之后当它死了",id,dn); } } }
-            atomic_store(&g_cone_set,1);
-            { static int lg; static uint32_t last=0xfffffffe; uint32_t now=tgt?*(uint32_t *)(tgt+8):0xffffffff; if(now!=last && lg++<60){ last=now; uint32_t tc=0,ti=0; if(tgt){ tc=*(uint32_t *)(tgt+4); ti=*(uint32_t *)(tgt+8); }
-                LOG("瞄准选目标：22 格内怪 %d 只；手指方向锥内 %s（类号 %u id %u，夹角 %.1f°）→ %s",nmon,tgt?"有":"无",tc,ti,tgt?acosf(bc>1?1:bc)*57.29578f:0.0f,tgt?"锁它":"对位置放"); } }
+        int far=cls==DM_AIM_SHOT;
+        if(fr && rec && dm_aim_free_listed(cls,sk,free_get)) {   // 自由瞄准：左摇杆方向（松着 = 原方向），不选怪 | free aim: the left stick's direction (released = the original direction), no monster picked
+            int32_t lx=0,ly=0;dm_input_sampled_left(&lx,&ly);float lv[2],f=test_frac();int lon=dm_private_aim_vector(lx,ly,lv);
+            if(lon){direction[0]=lv[0]*f;direction[1]=lv[1]*f;} else {direction[0]*=f;direction[1]*=f;}
+            cone_restore(); *(uint64_t *)(mg+0xd10)=0; g_cone_slot_mgr=mg; g_cone_rec=rec; g_cone_rec_was=*(uint8_t *)(rec+0x18); *(uint8_t *)(rec+0x18)=1; atomic_store(&g_cone_set,1);
+            { static int lg; if(lg++<40)LOG("自由瞄准：技能号 %d 类别 %d 施放函数 %u → 不选怪，方向 %s（%.2f, %.2f）比例 %.2f",sk,cls,fn,lon?"左摇杆":"原方向",direction[0],direction[1],f); }
+        } else if(active) {
+            float rg=((Range)(m->base+0x2b5c70))(mg,regs[1],0),k=(far && rg>0.0f && isfinite(rg))?24.0f/rg:(cls==DM_AIM_MOVE||cls==DM_AIM_ZONE)?test_frac():1.0f;
+            { static int lg; if(getenv("DM_SKILL_AIM_LOG") && lg++<12)LOG("瞄准适配：技能号 %d 手柄落点距离 %.2f 施放函数 %u 类别 %d 射程 %.2f 放大 %.1f",sk,dist,fn,cls,rg,k); }
+            direction[0]=vec[0]*k;direction[1]=vec[1]*k;
+            if(cone_cos()<=1.0f) {   // 手指方向选目标 | target selection by finger direction
+                cone_restore(); int nmon=0; float bc=0; float p0[2]={position[0],position[1]};
+                uint64_t tgt=cone_pick(m,regs[1],p0,vec,cone_cos(),&nmon,&bc);
+                if(tgt){ *(uint64_t *)(mg+0xd10)=tgt; g_cone_slot_mgr=mg; }
+                else if(rec){ g_cone_rec=rec; g_cone_rec_was=*(uint8_t *)(rec+0x18); *(uint8_t *)(rec+0x18)=1; }
+                { static int dn=-1; static uint32_t lid, cnt; if(dn<0){ const char *e=getenv("DM_TEST_AIM_DROP"); dn=e?atoi(e):0; } if(dn>0&&tgt){ uint32_t id=*(uint32_t *)(tgt+8); cnt=id==lid?cnt+1:1; lid=id; if(cnt>=(uint32_t)dn&&g_cone_ndrop<8){ g_cone_dropped[g_cone_ndrop++]=id; LOG("瞄准测试：id %u 被锁满 %d 次，之后当它死了",id,dn); } } }
+                atomic_store(&g_cone_set,1);
+                { static int lg; static uint32_t last=0xfffffffe; uint32_t now=tgt?*(uint32_t *)(tgt+8):0xffffffff; if(now!=last && lg++<60){ last=now; uint32_t tc=0,ti=0; if(tgt){ tc=*(uint32_t *)(tgt+4); ti=*(uint32_t *)(tgt+8); }
+                    LOG("瞄准选目标：22 格内怪 %d 只；手指方向锥内 %s（类号 %u id %u，夹角 %.1f°）→ %s",nmon,tgt?"有":"无",tc,ti,tgt?acosf(bc>1?1:bc)*57.29578f:0.0f,tgt?"锁它":"对位置放"); } }
+            }
         }
     }
     const char *path=getenv("DM_SKILL_AIM_LOG");if(path){static FILE *f;static unsigned n;if(!f)f=fopen(path,"w");

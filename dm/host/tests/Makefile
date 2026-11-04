@@ -37,6 +37,7 @@ run: \
 	$(B)/t_pages \
 	$(B)/t_sharedpages \
 	$(B)/t_padbind \
+	$(B)/t_aim \
 	$(B)/t_rift_clock \
 	$(B)/t_rift_hud \
 	$(B)/t_rift_next \
@@ -103,6 +104,7 @@ run: \
 	$(B)/t_modetx
 	$(B)/t_padmap
 	$(B)/t_padbind
+	$(B)/t_aim
 	$(B)/t_pages
 	$(B)/t_sharedpages
 	$(B)/t_unit_level
@@ -132,6 +134,8 @@ $(B)/t_padmap: t_padmap.c ../dm_padmap.h ../dm_input.h | $(B)
 	clang -O1 -Wall -Werror -o $@ t_padmap.c
 $(B)/t_padbind: t_padbind.c ../dm_padbind.h ../dm_input.h | $(B)
 	clang -O1 -Wall -Werror -o $@ t_padbind.c
+$(B)/t_aim: t_aim.c ../dm_aim.h | $(B)
+	clang -O1 -Wall -Werror -o $@ t_aim.c
 $(B)/t_pages: t_pages.c ../dm_pages.c ../dm.h | $(B)
 	clang -O1 -Wall -Werror -Wno-unused-function -I.. -Wl,-dead_strip -o $@ t_pages.c
 $(B)/t_sharedpages: t_sharedpages.c ../dm_sharedpages.c ../dm.h | $(B)

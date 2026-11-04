@@ -42,6 +42,8 @@ static NSString *func_name(uint64_t m) {
     if (m == DM_PADACT_MAPUP) return fill1("dmPadFnPan", @"↑");
     if (m == DM_PADACT_MAPDOWN) return fill1("dmPadFnPan", @"↓");
     if (m == DM_PADACT_MAPCENTER) return T("dmPadFnPanReset");
+    if (m == DM_PADACT_FREEAIM) return T("dmPadFnFreeAim");
+    if (m == DM_PADACT_FREEAIMTOGGLE) return T("dmPadFnFreeAimToggle");
     for (unsigned k = 0; k < sizeof k_slots / sizeof *k_slots; k++) { uint64_t s = 1ull << k_slots[k];
         if (m == s) return fill1("dmPadFnSkill", @(k_name[k_slots[k]]));
         if (m == (DM_BTN_ZL | s)) return fill1("dmPadSet2", @(k_name[k_slots[k]])); }
@@ -137,14 +139,14 @@ static NSString *combo_name(uint64_t mods, int btn) {   // 「− + ✛ ↑」�
     self.funcs = [NSMutableArray array]; self.bound = [NSMutableArray array]; self.sets = [NSMutableArray array]; self.clears = [NSMutableArray array]; self.listening = -1;
     self.grid = [NSGridView gridViewWithNumberOfColumns:9 rows:0]; self.grid.rowSpacing = 4; self.grid.columnSpacing = 10; self.grid.rowAlignment = NSGridRowAlignmentFirstBaseline;
     [self.grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing; [self.grid columnAtIndex:5].xPlacement = NSGridCellPlacementTrailing; [self.grid columnAtIndex:4].width = 18;
-    // 行序：六个技能格、第二套的六个、换套键、腰带四列、地图、地图大小 / 位置 / 缩放 / 平移、免费回城、菜单，然后其余各键 | Row order: the six skill slots, the six of the 2nd set, the set switch, the four belt columns, map, map size / position / zoom / panning, free town portal, menu, then the remaining buttons
+    // 行序：六个技能格、第二套的六个、换套键、腰带四列、地图、地图大小 / 位置 / 缩放 / 平移、免费回城、自由瞄准（按住 / 开关）、菜单，然后其余各键 | Row order: the six skill slots, the six of the 2nd set, the set switch, the four belt columns, map, map size / position / zoom / panning, free town portal, free aim (hold / toggle), menu, then the remaining buttons
     for (unsigned k = 0; k < sizeof k_slots / sizeof *k_slots; k++) [self addRow:1ull << k_slots[k]];
     for (unsigned k = 0; k < sizeof k_slots / sizeof *k_slots; k++) [self addRow:DM_BTN_ZL | 1ull << k_slots[k]];
     [self addRow:DM_BTN_ZL];
     for (int k = 0; k < 4; k++) [self addRow:1ull << k_belt[k]];
     [self addRow:DM_BTN_MINUS]; [self addRow:DM_PADACT_MAPSIZE]; [self addRow:DM_PADACT_MAPPOS]; [self addRow:DM_PADACT_MAPZOOMIN]; [self addRow:DM_PADACT_MAPZOOMOUT];
     [self addRow:DM_PADACT_MAPLEFT]; [self addRow:DM_PADACT_MAPRIGHT]; [self addRow:DM_PADACT_MAPUP]; [self addRow:DM_PADACT_MAPDOWN]; [self addRow:DM_PADACT_MAPCENTER];
-    [self addRow:DM_PADACT_TOWNPORTAL]; [self addRow:DM_BTN_PLUS];
+    [self addRow:DM_PADACT_TOWNPORTAL]; [self addRow:DM_PADACT_FREEAIM]; [self addRow:DM_PADACT_FREEAIMTOGGLE]; [self addRow:DM_BTN_PLUS];
     for (int b = 0; b < DM_PADBIND_N; b++) if (![self.funcs containsObject:@(1ull << b)]) [self addRow:1ull << b];
     self.unused = [NSTextField wrappingLabelWithString:@""]; self.unused.textColor = NSColor.secondaryLabelColor; self.unused.preferredMaxLayoutWidth = 1040;
     self.note = [NSTextField wrappingLabelWithString:@""]; self.note.textColor = NSColor.secondaryLabelColor; self.note.preferredMaxLayoutWidth = 1040; self.note.hidden = YES;

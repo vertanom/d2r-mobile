@@ -32,10 +32,14 @@ _Static_assert(sizeof(NpadState) == 0x28, "NpadState");
 
 static struct { _Atomic uint64_t buttons; _Atomic int32_t lx, ly, rx, ry; } g_in;
 static _Atomic int64_t g_sampling;
-static _Atomic uint64_t g_sampled_right;
+static _Atomic uint64_t g_sampled_right,g_sampled_left;
 void dm_input_sampled_right(int32_t *rx,int32_t *ry) {
     uint64_t v=atomic_load_explicit(&g_sampled_right,memory_order_acquire);
     *rx=(int32_t)(uint32_t)v;*ry=(int32_t)(uint32_t)(v>>32);
+}
+void dm_input_sampled_left(int32_t *lx,int32_t *ly) {
+    uint64_t v=atomic_load_explicit(&g_sampled_left,memory_order_acquire);
+    *lx=(int32_t)(uint32_t)v;*ly=(int32_t)(uint32_t)(v>>32);
 }
 
 // 测试开关 DM_TEST_HID_STALL_MS=<毫秒>：前端发布的 A 每出现一次按下沿，游戏下一次取手柄就先睡这么久再读——模拟「点下去那一刻游戏卡顿」。
@@ -430,6 +434,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     if (km & PK_MASK & ~(uint64_t)PK_TOUCH) { void dm_cam_remap_stick(int32_t *, int32_t *, int32_t *, int32_t *); int32_t zx = 0, zy = 0; dm_cam_remap_stick(&s->lx, &s->ly, &zx, &zy); }
     s->attributes = ATTR_CONNECTED;
     atomic_store_explicit(&g_sampled_right,(uint32_t)s->rx|((uint64_t)(uint32_t)s->ry<<32),memory_order_release);
+    atomic_store_explicit(&g_sampled_left,(uint32_t)s->lx|((uint64_t)(uint32_t)s->ly<<32),memory_order_release);
     receipt(s, id, style, km, read_start_ns);
 }
 

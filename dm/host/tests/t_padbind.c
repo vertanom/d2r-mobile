@@ -99,6 +99,11 @@ int main(void) {
     dm_padbind_step(&t, &st, DM_BTN_L, 0, 0, 0, &w); dm_padbind_step(&t, &st, DM_BTN_L | DM_BTN_LEFT, 10, 0, 0, &w);
     CHECK(st.acts == DM_PADACT_MAPLEFT && st.fired == DM_PADACT_MAPLEFT, "L+← 按着：acts 里有 MAPLEFT");
     dm_padbind_step(&t, &st, DM_BTN_L, 20, 0, 0, &w); CHECK(st.acts == 0, "松 ←：acts 清掉");
+    // 自由瞄准：按住型走 acts，切换型走 fired；写回去认得 | Free aim: the hold kind goes through acts, the toggle kind through fired; formatting reads back
+    CHECK(dm_padbind_parse("R=FREEAIM;MINUS+R=FREEAIMTOGGLE", &t), "FREEAIM / FREEAIMTOGGLE 认得"); memset(&st, 0, sizeof st);
+    CHECK(dm_padbind_step(&t, &st, DM_BTN_R, 0, 0, 0, &w) == 0 && st.acts == DM_PADACT_FREEAIM, "按住 R：acts 里有 FREEAIM，不发给游戏");
+    dm_padbind_step(&t, &st, 0, 10, 0, 0, &w); CHECK(st.acts == 0, "松 R：FREEAIM 清掉");
+    { char buf[256]; dm_padbind_table t2; CHECK(dm_padbind_format(&t, buf, sizeof buf) && strstr(buf, "R=FREEAIM\n") && strstr(buf, "MINUS+R=FREEAIMTOGGLE") && dm_padbind_parse(buf, &t2), "FREEAIM 写回去再读得回来"); }
     printf("== %d 项，失败 %d ==\n", checks, fails);
     return fails != 0;
 }

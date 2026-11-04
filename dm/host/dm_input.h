@@ -38,6 +38,11 @@ void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry
 // 私有skill-aim-v1：只取已实际GetNpad返回的右轴成对收样，非前端尚未消费值。
 // Private skill-aim-v1: takes only paired received samples of the right axis that GetNpad has actually returned, not values the front end has not yet had consumed.
 void dm_input_sampled_right(int32_t *rx,int32_t *ry);
+// 左摇杆同样取游戏实际收到的那一份（自由瞄准朝左摇杆方向放，hle_private_aim.c） | The left stick likewise as the game actually received it (free aim casts the left stick's way, hle_private_aim.c)
+void dm_input_sampled_left(int32_t *lx,int32_t *ly);
+// 自由瞄准（PC 的 Shift）：hold = 按住键此刻按着；toggle_edge = 切换键按下一次（开 ↔ 关）。dm_aim_free_on = 两者之一生效 | Free aim (the PC's Shift): hold = the hold button is down right now; toggle_edge = the toggle button went down once (on <-> off). dm_aim_free_on = either is in effect
+void dm_aim_free_set(int hold,int toggle_edge);
+int dm_aim_free_on(void);
 
 // 手柄状态注入点：GetNpadState 填完原状态后、伪键覆盖前调用。Mac 宿主触点脚本（touch_mac.c，Mac 专用、按 _mac 约定不进 iOS 包）启动时注册；iOS 不带该文件，保持空
 // Controller state injection point: called after GetNpadState has filled in the original state and before the pseudo-key override. The Mac host touch point script (touch_mac.c, Mac only, kept out of the iOS app by the _mac convention) registers at startup; iOS does not carry that file and it stays empty

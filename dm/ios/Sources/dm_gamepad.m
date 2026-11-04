@@ -109,6 +109,7 @@ static void apply(void) {
       if (menu != last_menu && !dm_padbind_is_identity(&g_bind)) { static int n; if (n++ < 20) LOG("手柄键位：%s", menu ? "菜单 / 面板 → 新按的键原样" : "局内 → 按表重映射"); } last_menu = menu;
       b = dm_padbind_step(&g_bind, &g_bind_st, b, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000, menu, g_bind.stage_ms, &wake);
       // 表里的宿主动作：按下那一刻执行一次，不发给游戏 | Host actions from the table: run once at the moment they go down, never sent to the game
+      uint64_t f_free = g_bind_st.fired;
       if (g_bind_st.fired) { uint64_t f = g_bind_st.fired; g_bind_st.fired = 0; void dm_ui_map_full(int on), dm_tp_request(void); int dm_ui_map_shown_full(void);
         if (f & DM_PADACT_MAPSIZE) { int on = !dm_ui_map_shown_full(); dm_ui_map_full(on); LOG("手柄键位：动作 MAPSIZE → %s", on ? "全屏地图" : "小地图"); }
         if (f & DM_PADACT_TOWNPORTAL) { dm_tp_request(); LOG("手柄键位：动作 TOWNPORTAL → 免费回城"); }
@@ -117,6 +118,8 @@ static void apply(void) {
           if (f & DM_PADACT_MAPZOOMIN) dm_ui_map_zoom(1);
           if (f & DM_PADACT_MAPZOOMOUT) dm_ui_map_zoom(-1);
           if (f & DM_PADACT_MAPCENTER) { void dm_ui_map_pan_reset(void); dm_ui_map_pan_reset(); } } }
+      { static int last_hold; int hold = (g_bind_st.acts & DM_PADACT_FREEAIM) != 0, tog = (f_free & DM_PADACT_FREEAIMTOGGLE) != 0;   // 自由瞄准：按住型跟 acts，切换型按下一次切一次（hle_private_aim.c） | free aim: the hold kind follows acts, the toggle kind flips once per press (hle_private_aim.c)
+        if (hold != last_hold || tog) { void dm_aim_free_set(int, int); dm_aim_free_set(hold, tog); if (hold != last_hold) LOG("手柄键位：动作 FREEAIM → %s", hold ? "按住" : "松开"); last_hold = hold; } }
       if (!g_pan_running && (g_bind_st.acts & (DM_PADACT_MAPLEFT | DM_PADACT_MAPRIGHT | DM_PADACT_MAPUP | DM_PADACT_MAPDOWN))) { g_pan_running = 1; pan_tick(); }
       if (wake >= 0) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wake + 1) * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ apply(); }); }
 #endif   // 触屏模式不交摇杆；手柄模式下没推出来的给 0 | Sticks are not delivered in touch mode; in controller mode a stick that is not pushed out gives 0
