@@ -14,6 +14,8 @@ uint32_t dm_hud_held(void) { return 0; }
 void dm_game_notice(uint8_t *b, const char *t) { (void)b; (void)t; }
 const char *dm_str(uint8_t *b, const char *k) { (void)b; return k; }
 void dm_test_clock_shift(int64_t d) { (void)d; }
+static int g_set = 10;   // stash_pages.txt 的 personal_pages | personal_pages in stash_pages.txt
+int dm_custom_num(const char *file, const char *key, int def) { (void)file; (void)key; (void)def; return g_set; }
 void (*g_dm_pre_commit_hook[5])(const char *);
 static int checks, fails;
 #define CHECK(c, ...) do { checks++; if (c) printf("  ✓ "); else { fails++; printf("  ✗ "); } printf(__VA_ARGS__); printf("\n"); } while (0)
@@ -28,7 +30,7 @@ static void wfile(const bufw *w) { char p[600]; spath(p, sizeof p); FILE *f = fo
 static size_t rfile(uint8_t *o, size_t cap) { char p[600]; spath(p, sizeof p); FILE *f = fopen(p, "rb"); if (!f) return 0; size_t n = fread(o, 1, cap, f); fclose(f); return n; }
 static uint8_t player[0x100];   // +0x90 = 0：没有物品栏（格空） | +0x90 = 0: no inventory (empty grid)
 static void load(void) { pages_load(NULL, (uint64_t)(uintptr_t)player); }
-static int total(void) { int t = 0; for (int i = 0; i < PGN; i++) t += g_pp[i].n; return t; }
+static int total(void) { int t = 0; for (int i = 0; i < PGN_MAX; i++) t += g_pp[i].n; return t; }
 int main(void) {
     snprintf(g_wd, sizeof g_wd, "/tmp/t_pages_%d", (int)getpid()); strlcpy(g_pchar, "Hero", sizeof g_pchar);
     char cmd[400]; snprintf(cmd, sizeof cmd, "rm -rf %s && mkdir -p %s/Hero", g_wd, g_wd); if (system(cmd)) return 2;
@@ -42,7 +44,7 @@ int main(void) {
     CHECK(pages_save(g_wd) == 0 && (gn = rfile(got, sizeof got)) == w.n && !memcmp(got, w.d, w.n), "后几页都空：写回版本 2，与 5 页的程序逐字节相同");
     // 第 7 页放一件 → 版本 3；再读回同一份 | One item on page 7 -> version 3; read back the same
     { uint8_t it[20]; mk(it, 900); pitem t = { 3, 4, 20, it }; pitem_dup(&g_pp[6], &t); }
-    CHECK(pages_save(g_wd) == 0 && (gn = rfile(got, sizeof got)) > 8 && got[4] == 3 && got[7] == PGN, "第 7 页有件：写版本 3，头里页数 10");
+    CHECK(pages_save(g_wd) == 0 && (gn = rfile(got, sizeof got)) > 8 && got[4] == 3 && got[7] == 10, "第 7 页有件：写版本 3，头里页数 10");
     load(); CHECK(g_pp[6].n == 1 && g_pp[6].it[0].x == 3 && g_pp[6].it[0].y == 4 && g_pp[1].n == 17 && total() == 18, "版本 3 读回：第 7 页那件在原格，第 2 页 17 件还在");
     ppage_free(&g_pp[6]);
     CHECK(pages_save(g_wd) == 0 && (gn = rfile(got, sizeof got)) == w.n && !memcmp(got, w.d, w.n), "第 7 页清空：又写回版本 2（旧程序读得懂）");
@@ -51,10 +53,10 @@ int main(void) {
     // 版本 1 | Version 1
     hdr(&w2, 1, 2, 0, 0); put_page(&w2, 1, 10); put_page(&w2, 2, 20); put_page(&w2, 0, 0); put_page(&w2, 3, 30); put_page(&w2, 1, 40); wfile(&w2);
     load(); CHECK(!g_pro && g_pcur == 2 && g_pp[0].n == 1 && g_pp[1].n == 2 && g_pp[3].n == 3 && g_pp[4].n == 1 && total() == 7, "版本 1（5 页）照读");
-    // 页数多于 PGN：只读 | More pages than PGN: read-only
-    hdr(&w2, 3, 0, 0, 12); for (int i = 0; i < 12; i++) put_page(&w2, i == 11, 500); wfile(&w2);
-    load(); CHECK(g_pro && total() == 0, "12 页的文件：只读，不读进来");
-    CHECK(pages_save(g_wd) == -1 && (gn = rfile(got, sizeof got)) == w2.n && !memcmp(got, w2.d, w2.n), "只读时不写：12 页的文件原样");
+    // 页数多于 PGN_MAX：只读 | More pages than PGN_MAX: read-only
+    hdr(&w2, 3, 0, 0, 70); for (int i = 0; i < 70; i++) put_page(&w2, i == 69, 500); wfile(&w2);
+    load(); CHECK(g_pro && total() == 0, "70 页的文件（上限 64）：只读，不读进来");
+    CHECK(pages_save(g_wd) == -1 && (gn = rfile(got, sizeof got)) == w2.n && !memcmp(got, w2.d, w2.n), "只读时不写：70 页的文件原样");
     g_pload = 1; g_pdirty = 1; pages_pre_commit(g_wd); gn = rfile(got, sizeof got); CHECK(gn == w2.n && !memcmp(got, w2.d, w2.n), "只读时提交前钩子也不写");
     g_pload = 0;
     // 坏文件 | Bad files
@@ -82,6 +84,19 @@ int main(void) {
       // 待定的是第 1 → 8 页：带待定记录也写版本 3 | Pending turn 1 -> 8: written as version 3 even with the pending record
       g_pto = 7; g_pcur = 7; pages_pre_commit(g_wd); gn = rfile(got, sizeof got); CHECK(gn > 8 && got[4] == 3 && got[6] == 1, "待定翻页到第 8 页：版本 3");
       load(); CHECK(g_pcur == 7 && !g_ppend && g_pdirty && g_pp[0].n == 1, "版本 3 的待定记录（第 1 → 8 页）进局落定：格（空）既不是 A 也不是 B → 翻页后，当前第 8 页"); }
+    // 设定页数（stash_pages.txt personal_pages） | Configured page count (personal_pages in stash_pages.txt)
+    hdr(&w2, 3, 0, 0, 10); for (int i = 0; i < 10; i++) put_page(&w2, i == 8 ? 2 : 0, 600); wfile(&w2);
+    g_set = 6; load(); CHECK(g_pgn == 9 && dm_pages_count() == 9 && g_pp[8].n == 2, "设 6 页、第 9 页有件：这次用 9 页，第 9 页的件还在");
+    ppage_free(&g_pp[8]); CHECK(pages_save(g_wd) == 0 && (gn = rfile(got, sizeof got)) > 8 && got[4] == 2, "清空第 9 页后存：第 6 页起都空 → 写回版本 2");
+    load(); CHECK(g_pgn == 6, "第 9 页清空后再进局：缩到设定的 6 页");
+    g_set = 15; load(); CHECK(g_pgn == 15 && dm_pages_count() == 15, "设 15 页：15 页");
+    { uint8_t it[20]; mk(it, 950); pitem t = { 1, 1, 20, it }; pitem_dup(&g_pp[13], &t); }
+    CHECK(pages_save(g_wd) == 0 && (gn = rfile(got, sizeof got)) > 8 && got[4] == 3 && got[7] == 15, "第 14 页有件：版本 3、头里 15 页");
+    g_set = 10; load(); CHECK(g_pgn == 14 && g_pp[13].n == 1, "再设回 10 页：第 14 页有件 → 用 14 页，件还在");
+    CHECK(pg_next_target(13, -1, 1, g_pgn) == 0, "用 14 页时第 14 页按 R 回第 1 页");
+    g_set = 200; pages_clear(); CHECK(g_pgn == PGN_MAX, "设定超过上限：夹到 64");
+    g_set = 0; pages_clear(); CHECK(g_pgn == 1, "设定 0：夹到 1");
+    g_set = 10;
     // 判定表 | Verdict table
     { const char *why; uint64_t H = 5;
       CHECK(pg_verdict(0, 1, 1, 0, 0, 1, H, &why) == PGV_UNREAD, "读不到角色档：等");

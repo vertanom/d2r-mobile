@@ -112,15 +112,22 @@ int dm_bits_simple(const uint8_t *bits, int len) { return len >= 4 && (bits[2] &
 // On entering the game with a pending record: settle it by the actual items in the grid with the same rule (pages_resolve).
 // When reading the side file on entry, an item (with its own identity) whose bytes also exist in the original save is logged, not removed (two items with the same bytes are possible; removing one loses it)
 // 侧文件格式：头 8 字节 SWPG、版本、当前页、有没有待定翻页记录（版本 2 起）、页数（版本 3）；接着逐页件数 + 件，有待定就再跟待定记录。
-//   版本 1 / 2 = 5 页（第 8 字节是 0）；版本 3 = 第 8 字节给页数。读：页数多于 PGN（以后更多页的程序写的）→ 只读不写、不翻页，免得写回时丢掉多出的页。
+//   版本 1 / 2 = 5 页（第 8 字节是 0）；版本 3 = 第 8 字节给页数。读：页数多于 PGN_MAX（以后更大上限的程序写的）→ 只读不写、不翻页，免得写回时丢掉多出的页。
 //   写：第 6–10 页都空、当前页和待定的两页都在前 5 页 → 照旧写版本 2（5 页，与 5 页的程序逐字节相同，旧程序照样读得懂）；否则写版本 3。
 //   5 页的程序读到版本 3 会当成坏文件（读到 0 件），之后一翻页就把侧文件写成只剩格里那页——同一份存档的所有设备都要用 10 页的程序
 // Side file format: 8-byte header SWPG, version, current page, whether a pending turn record follows (version 2 on), page count (version 3); then per page an item count + items, then the pending record if any.
-//   Version 1 / 2 = 5 pages (byte 8 is 0); version 3 = byte 8 holds the page count. Read: more pages than PGN (written by a future program with more pages) -> read-only, no write and no turns, so a write-back cannot drop the extra pages.
+//   Version 1 / 2 = 5 pages (byte 8 is 0); version 3 = byte 8 holds the page count. Read: more pages than PGN_MAX (written by a future program with a higher cap) -> read-only, no write and no turns, so a write-back cannot drop the extra pages.
 //   Write: pages 6-10 all empty and the current page and both pending pages within the first 5 -> write version 2 as before (5 pages, byte-identical to the 5-page program, which can still read it); otherwise version 3.
 //   A 5-page program reads version 3 as a bad file (0 items), and its next turn writes the side file with only the grid's page - every device on the same saves needs the 10-page program
-#define PGN 10
+// 页数可调：自定义目录里 stash_pages.txt 的 personal_pages=<页数>（缺省 10，1..PGN_MAX），每次进局读。本角色实际用的页数 g_pgn =
+//   max(设定, 侧文件里最后一页有件的页号, 当前页, 待定翻页的两页)——调小时有件的页不会消失：清空最后几页后下次进局才缩到设定值
+// Adjustable page count: personal_pages=<pages> in stash_pages.txt in the custom directory (default 10, 1..PGN_MAX), read on every run entry. The count this character actually uses, g_pgn =
+//   max(setting, last page in the side file that holds items, current page, both pages of a pending turn) - lowering it never makes a page with items disappear: it shrinks to the setting on the next entry after the last pages are emptied
+#define PGN_MAX 64
+#define PGN_DEF 10
 #define PGN_OLD 5   // 版本 1 / 2 的页数 | Page count of versions 1 / 2
+int dm_custom_num(const char *file, const char *key, int def);   // dm_custom.c
+static int pg_setting(void) { int v = dm_custom_num("stash_pages.txt", "personal_pages", PGN_DEF); return v < 1 ? 1 : v > PGN_MAX ? PGN_MAX : v; }
 // 翻页目标：cur 当前页、want 已排着的目标（-1 = 没排）、delta 这次新来的步数（L = -1、R = +1，可累加），回绕（同原版共享页：第 1 页往左到最后一页）；返回新的目标（等于 cur = 不用翻）
 // Turn target: cur = current page, want = target already queued (-1 = none), delta = steps just requested (L = -1, R = +1, they add up), wrapping around (like the original shared pages: left of page 1 is the last page); returns the new target (equal to cur = no turn needed)
 static int pg_next_target(int cur, int want, int delta, int n) { int t = ((want < 0 ? cur : want) + delta) % n; return t < 0 ? t + n : t; }
@@ -141,9 +148,9 @@ static int pg_verdict(size_t dn, int nA, int nB, int na, int nb, uint64_t h, uin
 }
 typedef struct { uint8_t x, y; uint16_t len; uint8_t *bits; } pitem;
 typedef struct { int n; pitem *it; } ppage;
-static ppage g_pp[PGN]; static int g_pcur, g_pload; static char g_pchar[64];
+static ppage g_pp[PGN_MAX]; static int g_pcur, g_pload, g_pgn = PGN_DEF; static char g_pchar[64];   // g_pgn = 本角色用的页数（见 PGN_MAX 上面） | g_pgn = page count used by this character (see above PGN_MAX)
 static int g_ppend, g_pdirty;   // 待定翻页：[0] 搬出的、[1] 搬进的；g_pdirty = 进局去重改了页，下次提交要写 | Pending flip: [0] moved out, [1] moved in; g_pdirty = dedup on entering the run changed a page, to be written on the next commit
-static int g_pro, g_pwant = -1;   // g_pro = 侧文件页数多于 PGN：只读（不翻、不写）；g_pwant = 排着的目标页（-1 = 没有），只在服务端拍里读写 | g_pro = side file has more pages than PGN: read-only (no turns, no writes); g_pwant = queued target page (-1 = none), read and written only in the server tick
+static int g_pro, g_pwant = -1;   // g_pro = 侧文件页数多于 PGN_MAX：只读（不翻、不写）；g_pwant = 排着的目标页（-1 = 没有），只在服务端拍里读写 | g_pro = side file has more pages than PGN_MAX: read-only (no turns, no writes); g_pwant = queued target page (-1 = none), read and written only in the server tick
 static uint64_t g_pmade, g_pflip_ns; static int g_pmore; static char g_pstash[64];   // 翻页时已提交过几次、上次翻页的单调时刻（读数：翻页到证明用了多久）、钩子要再请一次存盘、共享仓库名 | Number of commits already made at flip time, monotonic time of the last flip (readout: how long from the flip to its proof), the hook needs to request another save, shared stash name
 uint32_t dm_hud_held(void);   // dm_hud.c：客户端手上物品 id（0 = 空） | dm_hud.c: id of the item in the client's hand (0 = empty)
 uint64_t dm_fs_commit_count(void); const char *dm_stash_name(uint8_t *b);
@@ -187,14 +194,15 @@ static uint8_t *d2s_read(const char *wd, size_t *n) {   // 工作目录里本角
     fseek(f, 0, SEEK_END); long L = ftell(f); fseek(f, 0, SEEK_SET); d = L > 0 && L < (16 << 20) ? malloc((size_t)L) : NULL; *n = d ? fread(d, 1, (size_t)L, f) : 0; fclose(f);
     if (!*n) { free(d); d = NULL; } return d; }
 int dm_pages_cur(void) { return atomic_load(&g_pcur_pub); }   // 界面读：当前第几页（0 起） | UI read: the current page number (0-based)
-int dm_pages_count(void) { return PGN; }
+static _Atomic int g_pgn_pub = PGN_DEF;
+int dm_pages_count(void) { return atomic_load(&g_pgn_pub); }   // 界面读：本角色几页 | UI read: how many pages this character has
 static _Atomic int g_pflips;   // 翻过几次（界面看它变了 = 刚翻过页，dm_cursor.c 重设光标图） | Number of turns done (the UI sees it change = a turn just happened; dm_cursor.c resets the cursor picture)
 int dm_pages_flips(void) { return atomic_load(&g_pflips); }
 void dm_pages_request_flip(int dir) { atomic_fetch_add(&g_preq, dir < 0 ? -1 : 1); }   // 累加，服务端拍取走（连按几下 = 几步） | Accumulated and taken by the server tick (several presses = several steps)
 static void ppage_free(ppage *p) { for (int i = 0; i < p->n; i++) free(p->it[i].bits); free(p->it); p->n = 0; p->it = NULL; }
 static void pitem_dup(ppage *p, const pitem *it) { uint8_t *c = malloc(it->len); pitem *m = realloc(p->it, sizeof(pitem) * (size_t)(p->n + 1)); if (m) p->it = m; if (!c || !m) { free(c); return; } memcpy(c, it->bits, it->len); p->it[p->n] = *it; p->it[p->n++].bits = c; }
 static void pend_clear(void) { ppage_free(&g_pA); ppage_free(&g_pB); ppage_free(&g_pS0); }
-static void pages_clear(void) { pend_clear(); for (int i = 0; i < PGN; i++) ppage_free(&g_pp[i]); g_pcur = 0; g_ppend = 0; g_pdirty = 0; g_pro = 0; g_pwant = -1; atomic_store(&g_pcur_pub, 0); }
+static void pages_clear(void) { pend_clear(); for (int i = 0; i < PGN_MAX; i++) ppage_free(&g_pp[i]); g_pcur = 0; g_ppend = 0; g_pdirty = 0; g_pro = 0; g_pwant = -1; g_pgn = pg_setting(); atomic_store(&g_pcur_pub, 0); atomic_store(&g_pgn_pub, g_pgn); }
 static void pages_path(char *p, size_t n, const char *wd) { snprintf(p, n, "%s/%s/%s.swpage", wd, g_pchar, g_pchar); }
 static int ppage_read(FILE *f, ppage *p) {   // 一页：件数 u16，每件 x、y、长度 u16、位流；读坏返回 −1（读好的件留着） | One page: item count u16, then per item x, y, length u16, bit stream; returns -1 on a bad read (items read so far are kept)
     uint8_t c[2]; if (fread(c, 1, 2, f) != 2) return -1; int n = *(uint16_t *)c; if (!n) return 0;
@@ -235,32 +243,35 @@ static void pages_resolve(uint8_t *b, uint64_t player) {
 static void pages_load(uint8_t *b, uint64_t player) {   // 进局读一次（工作目录里的那份 = 上次提交的） | Read once on entering a run (the copy in the working directory = the last committed one)
     pages_clear(); const char *wd = dm_save_workdir(); if (!wd || !g_pchar[0]) return;
     char p[1200]; pages_path(p, sizeof p, wd); FILE *f = fopen(p, "rb"); if (!f) { LOG("个人仓库：%s 还没有翻过页（只有第 1 页）", g_pchar); return; }
-    uint8_t h[8]; int bad = 0, tot = 0, pend = 0, fn = 0;   // 头：SWPG、版本（1 / 2 / 3）、当前页、有没有待定翻页记录（版本 2 起）、页数（版本 3；1 / 2 是 5 页）；格式见 PGN 上面 | Header: SWPG, version (1 / 2 / 3), current page, whether a pending page turn record follows (version 2 on), page count (version 3; 1 / 2 have 5 pages); format above PGN
+    uint8_t h[8]; int bad = 0, tot = 0, pend = 0, fn = 0;   // 头：SWPG、版本（1 / 2 / 3）、当前页、有没有待定翻页记录（版本 2 起）、页数（版本 3；1 / 2 是 5 页）；格式见 PGN_MAX 上面 | Header: SWPG, version (1 / 2 / 3), current page, whether a pending page turn record follows (version 2 on), page count (version 3; 1 / 2 have 5 pages); format above PGN_MAX
     if (fread(h, 1, 8, f) != 8 || memcmp(h, "SWPG", 4)) bad = 1; else if (h[4] == 1 || h[4] == 2) fn = PGN_OLD; else if (h[4] == 3) fn = h[7]; else bad = 1;
-    if (!bad && fn > PGN) { fclose(f); g_pro = 1; LOG("【红】个人仓库：%s 有 %d 页（这个程序只认 %d 页，是更新的程序写的）→ 只读：不翻页、不写，免得丢掉多出的页", p, fn, PGN); return; }
+    if (!bad && fn > PGN_MAX) { fclose(f); g_pro = 1; LOG("【红】个人仓库：%s 有 %d 页（这个程序最多 %d 页，是更新的程序写的）→ 只读：不翻页、不写，免得丢掉多出的页", p, fn, PGN_MAX); return; }
     if (!bad && (fn < 1 || h[5] >= fn)) bad = 1;
     if (!bad) { g_pcur = h[5]; pend = h[4] >= 2 && h[6];
-        for (int pg = 0; pg < fn && !bad; pg++) { if (ppage_read(f, &g_pp[pg])) bad = 1; tot += g_pp[pg].n; }   // fn..PGN-1 页空着（5 页的文件读进 10 页） | Pages fn..PGN-1 stay empty (a 5-page file read into 10 pages)
+        for (int pg = 0; pg < fn && !bad; pg++) { if (ppage_read(f, &g_pp[pg])) bad = 1; tot += g_pp[pg].n; }   // fn 之后的页空着（5 页的文件读进 10 页） | Pages from fn on stay empty (a 5-page file read into 10 pages)
         if (!bad && pend) { uint8_t ft[2]; if (fread(ft, 1, 2, f) != 2 || ft[0] >= fn || ft[1] >= fn || fread(&g_pH0, 8, 1, f) != 1 || ppage_read(f, &g_pA) || ppage_read(f, &g_pB) || ppage_read(f, &g_pS0)) bad = 1; else { g_pfrom = ft[0]; g_pto = ft[1]; } } }
     fclose(f);
     if (bad) { LOG("【红】个人仓库：%s 坏了（读到 %d 件），只用读好的部分", p, tot); if (pend) { LOG("【红】个人仓库：待定翻页记录没读全，不落定（按已读的页槽）"); pend_clear(); pend = 0; } }
     if (pend) pages_resolve(b, player);
     { dm_blob bl[64]; int nb = dm_save_blobs(wd, g_pstash, bl, 64), drop = 0;   // 去重：页里有自己身份的那件，字节已在原版存档里 = 复制，从页里去掉（下次提交写回） | Dedup: an item in a page that has its own identity and whose bytes are already in the original save = a duplicate; remove it from the page (written back on the next commit)
-      for (int pg = 0; pg < PGN; pg++) for (int i = 0; i < g_pp[pg].n; ) { pitem *it = &g_pp[pg].it[i];
+      for (int pg = 0; pg < PGN_MAX; pg++) for (int i = 0; i < g_pp[pg].n; ) { pitem *it = &g_pp[pg].it[i];
           // 只记不删：原先当成复制从侧文件删掉，可字节相同的另一份也可能是别处还回来的复制品（iCloud 并回没划掉、每次进局再还一份），
           // 删掉的反而是玩家放进个人仓库的那份原件（个人仓库清空）。复制的来源已在源头堵上（翻页待定记录落定、并回清单按全部存档划掉），这里只留读数
           // Log only, do not remove: these used to be removed from the side file as duplicates, but the other same-byte copy may itself be a duplicate returned from elsewhere (the iCloud merge not crossing it off and returning another copy on every entry),
           // so what got removed was the original the player had put in the personal stash (personal stash emptied). The sources of duplication are closed at the root (pending page turns settled, merge list crossed off against all saves); only the reading is kept here
           if (!dm_bits_simple(it->bits, it->len) && dm_blobs_have(bl, nb, it->bits, it->len)) { LOG("【红】个人仓库：第 %d 页格 %d,%d 那件的字节在原版存档里也有一份（不删，只记）", pg + 1, it->x, it->y); drop++; } i++; }
       dm_blobs_free(bl, nb); (void)drop; }   // 只记不删：页槽没改，不因此回写（落定翻页设的 g_pdirty 保留） | Log only, do not remove: the page slots did not change, so no write-back for this (g_pdirty set by settling a turn is kept)
-    atomic_store(&g_pcur_pub, g_pcur); tot = 0; for (int pg = 0; pg < PGN; pg++) tot += g_pp[pg].n;   // 落定后重数 | Recount after settling
+    atomic_store(&g_pcur_pub, g_pcur); tot = 0; for (int pg = 0; pg < PGN_MAX; pg++) tot += g_pp[pg].n;   // 落定后重数 | Recount after settling
+    { int set = g_pgn, need = g_pcur + 1; for (int pg = 0; pg < PGN_MAX; pg++) if (g_pp[pg].n && pg + 1 > need) need = pg + 1;   // 本角色页数 = max(设定, 有件的最后一页, 当前页) | This character's page count = max(setting, last page with items, current page)
+      if (need > g_pgn) g_pgn = need; atomic_store(&g_pgn_pub, g_pgn);
+      if (g_pgn > set) LOG("个人仓库：设定 %d 页，但第 %d 页还有物品 / 是当前页 → 这次用 %d 页（清空后下次进局缩回设定）", set, g_pgn, g_pgn); }
     LOG("个人仓库：%s 当前第 %d 页，另外几页共 %d 件", g_pchar, g_pcur + 1, tot);
 }
 static int pages_save(const char *wd) {   // 写进工作目录（临时文件再改名）；只在提交前钩子里调 | Write into the working directory (temp file then rename); called only in the pre-commit hook
     char p[1200], t[1210]; pages_path(p, sizeof p, wd); snprintf(t, sizeof t, "%s.tmp", p);
-    if (g_pro) return -1;   // 只读（侧文件页数多于 PGN） | Read-only (side file has more pages than PGN)
-    int fn = g_pcur < PGN_OLD && (!g_ppend || (g_pfrom < PGN_OLD && g_pto < PGN_OLD)) ? PGN_OLD : PGN;   // 后几页都空就照旧写 5 页的版本 2（格式见 PGN 上面） | With the later pages all empty, write the 5-page version 2 as before (format above PGN)
-    for (int pg = PGN_OLD; pg < PGN && fn == PGN_OLD; pg++) if (g_pp[pg].n) fn = PGN;
+    if (g_pro) return -1;   // 只读（侧文件页数多于 PGN_MAX） | Read-only (side file has more pages than PGN_MAX)
+    int fn = g_pcur < PGN_OLD && (!g_ppend || (g_pfrom < PGN_OLD && g_pto < PGN_OLD)) ? PGN_OLD : g_pgn;   // 后几页都空就照旧写 5 页的版本 2（格式见 PGN_MAX 上面） | With the later pages all empty, write the 5-page version 2 as before (format above PGN_MAX)
+    for (int pg = PGN_OLD; pg < PGN_MAX && fn == PGN_OLD; pg++) if (g_pp[pg].n) fn = g_pgn > PGN_OLD ? g_pgn : PGN_OLD;   // 有件就写版本 3、写满本角色的页数 | With items there: version 3 with this character's page count
     FILE *f = fopen(t, "wb"); if (!f) return -1;
     uint8_t h[8] = { 'S', 'W', 'P', 'G', (uint8_t)(fn == PGN_OLD ? 2 : 3), (uint8_t)g_pcur, (uint8_t)(g_ppend ? 1 : 0), (uint8_t)(fn == PGN_OLD ? 0 : fn) }; int ok = fwrite(h, 1, 8, f) == 8;
     for (int pg = 0; pg < fn && ok; pg++) ok = ppage_write(f, &g_pp[pg]);
@@ -269,7 +280,7 @@ static int pages_save(const char *wd) {   // 写进工作目录（临时文件�
     return 0;
 }
 static void pages_flip(uint8_t *b, uint64_t G, uint64_t player, int tgt) {   // 直接翻到第 tgt 页（0 起）；调用方保证没有待定翻页 | Turn straight to page tgt (0-based); the caller makes sure no turn is pending
-    if (g_ppend || g_pro || tgt < 0 || tgt >= PGN || tgt == g_pcur) return;
+    if (g_ppend || g_pro || tgt < 0 || tgt >= g_pgn || tgt == g_pcur) return;
     uint64_t t0 = pf_now(); pend_clear();
     uint64_t inv = *(uint64_t *)(player + 0x90), it = inv && *(uint32_t *)inv == 0x01020304 ? *(uint64_t *)(inv + 0x10) : 0, list[256]; int n = 0;
     for (int k = 0; it && k < 2048 && n < 256; k++) { uint64_t d = *(uint64_t *)(it + 0x10); if (!d) break; if (*(uint32_t *)(it + 0xc) == 0 && *(uint8_t *)(d + 0x55) == 4) list[n++] = it; it = *(uint64_t *)(d + 0xb0); }
@@ -387,8 +398,8 @@ void dm_pages_tick(uint64_t G, uint64_t player, uint8_t *b) {   // 服务端拍�
     // With a pending turn, wait until it is proven (the pre-commit hook settles it and the turn happens on a later tick; no request is dropped). With a save in flight (serialized, character file not yet written), also wait for the write (at most 50 ticks, usually a few ms)
     // so the turn can record the unique pre-turn fingerprint; no more waiting for 'a save happened in this second' (reason above g_ser_infl)
     { static uint32_t hq; static int holding; pthread_mutex_lock(&g_pmu);
-      if (dir && g_pro) { LOG("个人仓库：侧文件只读（页数多于 %d），不翻页", PGN); dir = 0; }
-      if (dir) { int was = g_pwant; g_pwant = pg_next_target(g_pcur, g_pwant, dir, PGN); if (g_ppend && g_pwant != was) LOG("个人仓库：上一次翻页还没证明，目标排成第 %d 页（证明后直接翻过去）", g_pwant + 1); }
+      if (dir && g_pro) { LOG("个人仓库：侧文件只读（页数多于 %d），不翻页", PGN_MAX); dir = 0; }
+      if (dir) { int was = g_pwant; g_pwant = pg_next_target(g_pcur, g_pwant, dir, g_pgn); if (g_ppend && g_pwant != was) LOG("个人仓库：上一次翻页还没证明，目标排成第 %d 页（证明后直接翻过去）", g_pwant + 1); }
       if (g_pwant == g_pcur) g_pwant = -1;
       if (g_pwant < 0) holding = 0;
       if (g_pwant >= 0 && !g_ppend) {
