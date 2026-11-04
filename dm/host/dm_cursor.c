@@ -1952,12 +1952,13 @@ void dm_ui_map_full(int on) { atomic_store(&g_map_req, on != 0); }
 // Zoom: the AutoMap widget has one level for fullscreen and one for mini (+0x15a8 / +0x15ac, original 1.0 / 0.5, read every frame when drawing, see ui_map_geom_pump), in steps of 1.25x, -4...+6 steps;
 // when the game rebuilds the map and writes the original back, it is rewritten here every frame, so it survives area changes; not persisted, an App restart goes back to the original.
 static _Atomic int g_map_pos_req, g_map_zoom_req;
+static int g_mv_dirty;   // 地图视图存档要写（定义与说明见下面 mv_load） | the map view save needs writing (definition and notes at mv_load below)
 static int g_map_side0 = 2, g_map_zoom_step[2];   // 主线程独用 | main thread only
 void dm_ui_map_pos_toggle(void) { atomic_store(&g_map_pos_req, 1); }
 void dm_ui_map_zoom(int d) { atomic_fetch_add(&g_map_zoom_req, d); }
 static void ui_map_zoom_pump(module_t *m, uint64_t root, int mini) {
     int d = atomic_exchange(&g_map_zoom_req, 0), k = mini ? 1 : 0;
-    if (d) { int v = g_map_zoom_step[k] + d; g_map_zoom_step[k] = v < -4 ? -4 : v > 6 ? 6 : v; LOG("地图缩放：%s → 第 %d 步（×%.2f）", k ? "小地图" : "全屏地图", g_map_zoom_step[k], powf(1.25f, (float)g_map_zoom_step[k])); }
+    if (d) { int v = g_map_zoom_step[k] + d; g_map_zoom_step[k] = v < -4 ? -4 : v > 6 ? 6 : v; g_mv_dirty = 1; LOG("地图缩放：%s → 第 %d 步（×%.2f）", k ? "小地图" : "全屏地图", g_map_zoom_step[k], powf(1.25f, (float)g_map_zoom_step[k])); }
     uint64_t am = ui_panel(root, "AutoMap"); if (!am || *(uint64_t *)am != (uint64_t)m->base + 0x20c58a0) return;
     static float base[2], ours[2]; float *z = (float *)(am + (k ? 0x15ac : 0x15a8));
     if (*z != ours[k]) { if (!(*z > 0.01f && *z < 100)) return; base[k] = *z; }   // 不是我们上次写的：游戏写了新值，当原值 | not what we wrote last: the game wrote a fresh value, take it as the original
@@ -1984,19 +1985,42 @@ int dm_ui_map_shown_full(void) { return atomic_load(&g_map_full_raw); }
 // when the mode changes the game zeroes the scroll and the next frame writes it back here (panning is kept); it returns to zero only on MAPCENTER or leaving the run. Capped at ±400 cells
 static _Atomic int g_map_pan_dx, g_map_pan_dy, g_map_pan_reset;
 static int g_map_pan_x, g_map_pan_y;   // 主线程独用 | main thread only
+// 地图视图存档（Mac 手柄键位的地图动作用）：手柄模式下玩家选的全屏 / 小地图、小地图放哪边、两档缩放步数、平移，写在 <自定目录>/map_view.txt（与 sw_custom.txt 同目录）。
+// 第一次进局读一次；改了就记脏，主线程每 30 帧最多写一次（临时文件再改名）。没有文件 = 原版行为（全屏 / 小地图照游戏设置，缩放 0 步，不平移）。
+// Map view save (for the Mac controller remap's map actions): in controller mode the player's fullscreen / minimap choice, minimap side, the two zoom step counts and panning, written to <custom dir>/map_view.txt (next to sw_custom.txt).
+// Read once on the first entry into a run; any change marks it dirty and the main thread writes it at most once every 30 frames (temp file then rename). No file = original behavior (fullscreen / minimap per the game setting, zoom 0 steps, no panning).
+static int g_map_full_pref = -1, g_map_side_pref, g_mv_loaded, g_mv_run;   // g_mv_run：这一局已按存档摆过小地图那一边 | g_mv_run: the minimap side has been applied from the save in this run   // g_map_full_pref：1 全屏 / 0 小地图 / −1 没选过；g_map_side_pref：1 放左 / 2 放右 / 0 没选过 | 1 fullscreen / 0 minimap / -1 never chosen; 1 left / 2 right / 0 never chosen
+static int mv_clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+static int mv_path(char *p, size_t n) { const char *d = dm_custom_dir(); if (!d) return 0; snprintf(p, n, "%s/map_view.txt", d); return 1; }
+static void mv_load(void) {
+    g_mv_loaded = 1; char p[1100]; if (!mv_path(p, sizeof p)) return; FILE *f = fopen(p, "r"); if (!f) return; char k[32]; int v;
+    while (fscanf(f, " %31[^=\n]=%d", k, &v) == 2) {
+        if (!strcmp(k, "full")) g_map_full_pref = v < 0 ? -1 : v != 0; else if (!strcmp(k, "side")) g_map_side_pref = v == 1 || v == 2 ? v : 0;
+        else if (!strcmp(k, "zoom_full")) g_map_zoom_step[0] = mv_clamp(v, -4, 6); else if (!strcmp(k, "zoom_mini")) g_map_zoom_step[1] = mv_clamp(v, -4, 6);
+        else if (!strcmp(k, "pan_x")) g_map_pan_x = mv_clamp(v, -400, 400); else if (!strcmp(k, "pan_y")) g_map_pan_y = mv_clamp(v, -400, 400); }
+    fclose(f); if (g_map_side_pref) g_map_side0 = g_map_side_pref;
+    LOG("地图视图：读入 %s（全屏 %d、放%s、缩放 %d / %d 步、平移 %d,%d）", p, g_map_full_pref, g_map_side_pref == 1 ? "左" : g_map_side_pref == 2 ? "右" : "（未选）", g_map_zoom_step[0], g_map_zoom_step[1], g_map_pan_x, g_map_pan_y);
+}
+static void mv_save_maybe(void) {
+    static uint64_t last; uint64_t fr = dm_guest_frame(); if (!g_mv_dirty || fr - last < 30) return; last = fr; g_mv_dirty = 0;
+    char p[1100], t[1110]; if (!mv_path(p, sizeof p)) return; snprintf(t, sizeof t, "%s.tmp", p); FILE *f = fopen(t, "w"); if (!f) return;
+    int ok = fprintf(f, "full=%d\nside=%d\nzoom_full=%d\nzoom_mini=%d\npan_x=%d\npan_y=%d\n", g_map_full_pref, g_map_side_pref, g_map_zoom_step[0], g_map_zoom_step[1], g_map_pan_x, g_map_pan_y) > 0;
+    if (fclose(f) || !ok || rename(t, p)) { remove(t); LOG("【红】地图视图：写 %s 失败", p); }
+}
 void dm_ui_map_pan(int dx, int dy) { atomic_fetch_add(&g_map_pan_dx, dx); atomic_fetch_add(&g_map_pan_dy, dy); }
 void dm_ui_map_pan_reset(void) { atomic_store(&g_map_pan_reset, 1); }
 static void ui_map_center(module_t *m, uint64_t root, int mini) {
     static int ours, ours_x; int32_t *sc = (int32_t *)(m->base + 0x2d5e914), *sx = (int32_t *)(m->base + 0x2d5e910); int want = 0;
     { int dx = atomic_exchange(&g_map_pan_dx, 0), dy = atomic_exchange(&g_map_pan_dy, 0), rs = atomic_exchange(&g_map_pan_reset, 0);
-      if (rs || !dm_uiscreen_ingame()) { if (rs && (g_map_pan_x || g_map_pan_y)) LOG("地图平移：归零"); g_map_pan_x = g_map_pan_y = 0; }
-      else if (dx || dy) { g_map_pan_x += dx; g_map_pan_y += dy; if (g_map_pan_x < -400) g_map_pan_x = -400; if (g_map_pan_x > 400) g_map_pan_x = 400; if (g_map_pan_y < -400) g_map_pan_y = -400; if (g_map_pan_y > 400) g_map_pan_y = 400; } }
-    if (*sx != g_map_pan_x && (*sx == ours_x || *sx == 0)) *sx = g_map_pan_x;
-    if (*sx == g_map_pan_x) ours_x = g_map_pan_x;
+      if (rs) { if (g_map_pan_x || g_map_pan_y) LOG("地图平移：归零"); g_map_pan_x = g_map_pan_y = 0; g_mv_dirty = 1; }   // 平移存进地图视图存档，出局不再清零 | panning is kept in the map view save, no longer cleared on leaving a run
+      else if ((dx || dy) && dm_uiscreen_ingame()) { g_mv_dirty = 1; g_map_pan_x += dx; g_map_pan_y += dy; if (g_map_pan_x < -400) g_map_pan_x = -400; if (g_map_pan_x > 400) g_map_pan_x = 400; if (g_map_pan_y < -400) g_map_pan_y = -400; if (g_map_pan_y > 400) g_map_pan_y = 400; } }
+    int px = dm_uiscreen_ingame() ? g_map_pan_x : 0;   // 局外不加平移（存着，下次进局再用） | no panning outside a run (kept for the next run)
+    if (*sx != px && (*sx == ours_x || *sx == 0)) *sx = px;
+    if (*sx == px) ours_x = px;
     int x, y, w, h, rw = 0, rh = 0; dm_ui_rect(&x, &y, &w, &h); uint64_t am = !mini && dm_uiscreen_ingame() && dm_screen_real(&rw, &rh) && h > 0 && h < rh ? ui_panel(root, "AutoMap") : 0;
     if (am && *(uint64_t *)am == (uint64_t)m->base + 0x20c58a0) { float q = ceilf(((float (*)(uint64_t))(m->base + 0x390b38))(am) * *(float *)(am + 0x15a8) * 8) / 8; if (q < 0.125f) q = 0.125f;
         float cell = q * *(float *)(m->base + 0x2d5e91c); if (cell > 0.1f) want = (int)lroundf((y - (rh - h) / 2.0f) / cell); }
-    want += g_map_pan_y;
+    if (dm_uiscreen_ingame()) want += g_map_pan_y;
     if (*sc == want || (*sc != ours && *sc != 0)) { if (*sc == want) ours = want; return; }   // 已是目标值；或是别人写的非零值（不是我们上次写的）：不动 | Already the target value; or a non-zero value written by someone else (not what we last wrote): leave it alone
     { static int lg; if (lg++ < 8) LOG("全屏地图中心：纵向卷动量 %d → %d 格", *sc, want); } *sc = want; ours = want;
 }
@@ -2020,7 +2044,7 @@ static void ui_map_pump(module_t *m, uint64_t root) {
     // tick, and with no ticks after leaving it stays at its last value 1. Out-of-run switch requests are dropped too, not carried into the next run.
     if (!dm_uiscreen_ingame()) {
         int pending = atomic_exchange(&g_map_req, -1);
-        atomic_store(&g_map_full_now, 0); atomic_store(&g_map_full_raw, 0);
+        atomic_store(&g_map_full_now, 0); atomic_store(&g_map_full_raw, 0); g_mv_run = 0;
         if (pending >= 0) { static int n; if (n++ < 4) LOG("地图：局外的切换请求已丢掉（局外不调原版地图切换）"); }
         return;
     }
@@ -2030,9 +2054,17 @@ static void ui_map_pump(module_t *m, uint64_t root) {
     { static long at = -1; static int tv; uint64_t fr = dm_guest_frame(); if (at < 0) { const char *e = getenv("DM_TEST_AUTOMAP"); at = e ? atol(e) : 0; const char *c = e ? strchr(e, ':') : NULL; tv = c ? atoi(c + 1) : 0; }
       if (at > 0 && fr >= (uint64_t)at) { at = 0; *(volatile int32_t *)(m->base + 0x2d479f4) = tv; ((void (*)(int))(m->base + 0x40f780))(tv); cfg = tv; mini = *(volatile int32_t *)(m->base + 0x2d5c748); LOG("测试 DM_TEST_AUTOMAP：帧 %llu 把「透视地图尺寸」改成 %d", (unsigned long long)fr, tv); } }
     int dm_padmode_current(void); dm_hud_info hi; dm_hud_get(&hi);
+    // 地图视图存档：第一次进局读；每局开头把存档里的小地图那一边摆回去（配置是微缩档时改配置值，同 MAPPOS）；有改动就写
+    // Map view save: read on the first run; at the start of each run put the saved minimap side back (with a minimap setting the config value is changed, as MAPPOS does); write when changed
+    if (!g_mv_loaded) mv_load();
+    if (!g_mv_run && hi.valid) { g_mv_run = 1;
+        if (g_map_side_pref && (cfg == 1 || cfg == 2) && cfg != g_map_side_pref) { cfg = g_map_side_pref; *(volatile int32_t *)(m->base + 0x2d479f4) = cfg; g_map_cfg_seen = cfg;
+            if (mini) ((void (*)(int))(m->base + 0x40f780))(cfg); mini = *(volatile int32_t *)(m->base + 0x2d5c748); LOG("地图视图：小地图按存档放%s", cfg == 1 ? "左" : "右"); } }
+    mv_save_maybe();
     if (atomic_exchange(&g_map_pos_req, 0)) {   // 小地图放左 ↔ 放右 | minimap left <-> right
         if (cfg == 1 || cfg == 2) { cfg = 3 - cfg; *(volatile int32_t *)(m->base + 0x2d479f4) = cfg; g_map_cfg_seen = cfg; if (mini) ((void (*)(int))(m->base + 0x40f780))(cfg); }
         else { g_map_side0 = 3 - g_map_side0; if (mini) ((void (*)(int))(m->base + 0x40f780))(g_map_side0); }
+        g_map_side_pref = cfg == 1 || cfg == 2 ? cfg : g_map_side0; g_mv_dirty = 1;
         mini = *(volatile int32_t *)(m->base + 0x2d5c748); LOG("地图位置：小地图 → %s（配置值 %d）", (cfg == 1 || (cfg == 0 && g_map_side0 == 1)) ? "放左" : "放右", cfg); }
     ui_map_zoom_pump(m, root, mini);
     int r = atomic_exchange(&g_map_req, -1);
@@ -2040,6 +2072,12 @@ static void ui_map_pump(module_t *m, uint64_t root) {
     // controller mode is the original UI: the three settings work as in the original game; switch requests (such as the Mac controller remap's MAPSIZE action, dm_gamepad.m) are carried out; with the config on full screen, switching back uses minimap right (as in touch), and an area change rebuilds from the config
     if (dm_padmode_current()) {
         int small = cfg == 1 ? 1 : cfg == 2 ? 2 : g_map_side0;
+        // 玩家用 MAPSIZE 选过全屏 / 小地图就记下（存进地图视图存档）；换区域后游戏照配置重建地图，换区域后 60 帧内对不上就按记下的摆回去（不长期硬压：面板等原版自己的切换照旧）
+        // Remember the player's fullscreen / minimap choice made with MAPSIZE (kept in the map view save); after an area change the game rebuilds the map from its setting, so for 60 frames after an area change a mismatch is put back to the remembered choice (no permanent override: the original game's own switches, e.g. for panels, still work)
+        if (r >= 0 && g_map_full_pref != r) { g_map_full_pref = r; g_mv_dirty = 1; }
+        { static int area = -1; static uint64_t until; uint64_t fr = dm_guest_frame();
+          if (hi.valid && hi.area != area) { area = hi.area; until = fr + 60; }
+          if (r < 0 && g_map_full_pref >= 0 && fr < until && (mini == 0) != g_map_full_pref) r = g_map_full_pref; }
         if (r >= 0 && (mini == 0) != r) { ((void (*)(int))(m->base + 0x40f780))(r ? 0 : small); mini = *(volatile int32_t *)(m->base + 0x2d5c748); LOG("地图切换：→ %s（配置值 %d 不动，不落盘）", r ? "全屏" : small == 1 ? "微缩放左" : "微缩放右", cfg); }
         atomic_store(&g_map_full_now, mini == 0 && (cfg == 1 || cfg == 2)); atomic_store(&g_map_full_raw, mini == 0); return;
     }

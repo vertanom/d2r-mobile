@@ -64,12 +64,12 @@ static void bind_reload(uint64_t held) {
     LOG("手柄键位：读入 %s（%s，分段 %d 毫秒）", p, dm_padbind_is_identity(&t) ? "原样" : "有改动", t.stage_ms);
 }
 static void apply(void);
-// 地图平移按住一直走：每 30 毫秒挪 6 格，松开（acts 里没有平移了）就停。方向实测（2026-11-03）：卷动量为正时地图往右 / 往下走，所以「地图往左」给负值 | Map panning keeps moving while held: 6 cells every 30 ms, stops once released (no panning left in acts). Direction measured (2026-11-03): a positive scroll moves the map right / down, so "map left" is negative
+// 地图平移按住一直走：每 30 毫秒挪 12 格（Victor 2026-11-04 再快一倍），松开（acts 里没有平移了）就停。方向实测（2026-11-03）：卷动量为正时地图往右 / 往下走，所以「地图往左」给负值 | Map panning keeps moving while held: 12 cells every 30 ms (Victor 2026-11-04: twice as fast again), stops once released (no panning left in acts). Direction measured (2026-11-03): a positive scroll moves the map right / down, so "map left" is negative
 static int g_pan_running;
 static void pan_tick(void) {
     uint64_t a = g_bind_st.acts; int dx = !!(a & DM_PADACT_MAPRIGHT) - !!(a & DM_PADACT_MAPLEFT), dy = !!(a & DM_PADACT_MAPDOWN) - !!(a & DM_PADACT_MAPUP);
     if (!dx && !dy) { g_pan_running = 0; return; }
-    void dm_ui_map_pan(int dx, int dy); dm_ui_map_pan(dx * 6, dy * 6);
+    void dm_ui_map_pan(int dx, int dy); dm_ui_map_pan(dx * 12, dy * 12);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ pan_tick(); });
 }
 // 键位窗口（host/padbind_mac.m）点了「应用」：马上重读文件、按新表放掉按着的键，不等下一次手柄输入
