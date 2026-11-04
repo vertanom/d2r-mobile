@@ -114,6 +114,11 @@ int dm_ui_bind_active(void); uint64_t dm_ui_auto_release(void);   /* 取手柄�
 void dm_ui_bind_cancel(void);
 void dm_ui_map_full(int on);
 int dm_ui_map_is_full(void);
+int dm_ui_map_shown_full(void);
+void dm_ui_map_pos_toggle(void);   // 小地图放左 ↔ 放右（dm_cursor.c） | minimap left <-> right (dm_cursor.c)
+void dm_ui_map_zoom(int d);
+void dm_ui_map_pan(int dx, int dy);  // 地图平移（格，正 = 地图往右 / 往下，dm_cursor.c） | map panning (cells, positive = map moves right / down, dm_cursor.c)
+void dm_ui_map_pan_reset(void);      // 平移归零 | reset panning        // 地图缩放 d 步（+ 放大 / − 缩小，dm_cursor.c） | map zoom by d steps (+ in / - out, dm_cursor.c)   // 画面此刻是不是全屏地图，不论档位（dm_cursor.c） | whether the map on screen is fullscreen now, whatever the setting (dm_cursor.c)
 // 面板态（前端判的：局内开着任何非常驻面板 / 对话菜单 / 死亡弹窗）：on = 1 时全屏地图先让成小地图，关掉面板回到玩家要的那档（触屏模式；任意线程调）
 // Panel state (judged by the front end: in a run, any non-resident panel / dialog menu / death dialog open): with on = 1 the full-screen map first steps aside to the minimap, and after the panels close it returns to what the player wants (touch mode; callable from any thread)
 void dm_ui_map_hold(int on);

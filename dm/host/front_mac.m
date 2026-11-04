@@ -138,6 +138,7 @@ double front_display_refresh(char *name, size_t n) {
 - (void)quit:(id)s { (void)s; app_quit("菜单退出"); }
 - (void)keys:(id)s { (void)s; show_keys(); }
 - (void)share:(id)s { (void)s; share_logs_ui(); }
+- (void)pad:(id)s { (void)s; void dm_padbind_show(NSWindow *); dm_padbind_show(g_win); }
 @end
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
@@ -228,6 +229,7 @@ void front_run(void (*guest)(void)) {
           NSMenu *(^add)(const char *) = ^NSMenu *(const char *t) { NSMenuItem *it = [NSMenuItem new]; [bar addItem:it]; NSMenu *m = [[NSMenu alloc] initWithTitle:@(t)]; it.submenu = m; return m; };
           [[add("") addItemWithTitle:@(ui("dmAppQuit")) action:@selector(quit:) keyEquivalent:@"q"] setTarget:ctl];
           NSMenuItem *fs = [add(ui("dmAppMenuView")) addItemWithTitle:@(ui("dmAppFullscreen")) action:@selector(toggleFullScreen:) keyEquivalent:@"f"]; fs.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+          { NSMenuItem *pi = [add(ui("dmPadMenu")) addItemWithTitle:@(ui("dmPadTitle")) action:@selector(pad:) keyEquivalent:@","]; pi.target = ctl; }   // 手柄按键窗口（padbind_mac.m） | controller buttons window (padbind_mac.m)
           { NSMenu *hm = add(ui("dmAppMenuHelp")); [[hm addItemWithTitle:@(ui("dmAppKeysTitle")) action:@selector(keys:) keyEquivalent:@""] setTarget:ctl]; [[hm addItemWithTitle:@(ui("dmAppShareLog")) action:@selector(share:) keyEquivalent:@""] setTarget:ctl]; }
           NSApp.mainMenu = bar; }
         { void dm_gamepad_start(void (*on_mode)(int pad)); dm_gamepad_start(NULL); }   // 手柄（与 iOS 壳共用 ios/Sources/dm_gamepad.m）：连上即用，与键盘并存 | Gamepad (ios/Sources/dm_gamepad.m, shared with the iOS shell): works as soon as it is connected, alongside the keyboard

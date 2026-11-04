@@ -1940,11 +1940,34 @@ static void ui_bind_pump(uint64_t root, uint64_t fr) {
 // and after the panel closes, or after an area change in which the game rebuilt the map from the config, it is switched back to g_map_want.
 // With the config on full screen (0) the minimap is shown as "minimap right" (2) and the config value is not rewritten: the player's full-screen choice is kept and used (player report: choosing full screen had no effect, and opening the inventory / changing area went back to the minimap).
 // The controller has no key for switching this mode (the map key − only opens / closes).
-static _Atomic int g_map_req = -1, g_map_full_now, g_map_hold;
+static _Atomic int g_map_req = -1, g_map_full_now, g_map_hold, g_map_full_raw;
 static int g_map_want = -1, g_map_cfg_seen = -1;   // 主线程（ui_map_pump）独用 | main thread (ui_map_pump) only
 void dm_ui_map_full(int on) { atomic_store(&g_map_req, on != 0); }
+// Mac 手柄键位的地图动作（dm_gamepad.m）：小地图放左 ↔ 放右；地图缩放一步（+1 放大 / −1 缩小）。主线程在 ui_map_pump 里办
+// 放左 / 放右：配置是微缩档时改配置值本身（同玩家在选项页改，DM_TEST_AUTOMAP 同路）；配置是全屏档时只换宿主记的「小地图放哪边」（g_map_side0，触屏 / 手柄切回小地图都用它）。
+// 缩放：AutoMap 控件里全屏 / 微缩各一档（+0x15a8 / +0x15ac，原版 1.0 / 0.5，画线时每帧读，见 ui_map_geom_pump），按 1.25 倍一步、−4…+6 步；
+// 游戏重建地图把它写回原值时这里每帧再写回去，所以换区域也留着；不落盘，重开 App 回原版。
+// The Mac controller remap's map actions (dm_gamepad.m): minimap left <-> right; one map zoom step (+1 in / -1 out). Done by the main thread in ui_map_pump
+// Left / right: with a minimap setting the config value itself is changed (as if the player changed it on the options page, same path as DM_TEST_AUTOMAP); with the full-screen setting only the host's "minimap side" changes (g_map_side0, used by touch and controller when going back to the minimap).
+// Zoom: the AutoMap widget has one level for fullscreen and one for mini (+0x15a8 / +0x15ac, original 1.0 / 0.5, read every frame when drawing, see ui_map_geom_pump), in steps of 1.25x, -4...+6 steps;
+// when the game rebuilds the map and writes the original back, it is rewritten here every frame, so it survives area changes; not persisted, an App restart goes back to the original.
+static _Atomic int g_map_pos_req, g_map_zoom_req;
+static int g_map_side0 = 2, g_map_zoom_step[2];   // 主线程独用 | main thread only
+void dm_ui_map_pos_toggle(void) { atomic_store(&g_map_pos_req, 1); }
+void dm_ui_map_zoom(int d) { atomic_fetch_add(&g_map_zoom_req, d); }
+static void ui_map_zoom_pump(module_t *m, uint64_t root, int mini) {
+    int d = atomic_exchange(&g_map_zoom_req, 0), k = mini ? 1 : 0;
+    if (d) { int v = g_map_zoom_step[k] + d; g_map_zoom_step[k] = v < -4 ? -4 : v > 6 ? 6 : v; LOG("地图缩放：%s → 第 %d 步（×%.2f）", k ? "小地图" : "全屏地图", g_map_zoom_step[k], powf(1.25f, (float)g_map_zoom_step[k])); }
+    uint64_t am = ui_panel(root, "AutoMap"); if (!am || *(uint64_t *)am != (uint64_t)m->base + 0x20c58a0) return;
+    static float base[2], ours[2]; float *z = (float *)(am + (k ? 0x15ac : 0x15a8));
+    if (*z != ours[k]) { if (!(*z > 0.01f && *z < 100)) return; base[k] = *z; }   // 不是我们上次写的：游戏写了新值，当原值 | not what we wrote last: the game wrote a fresh value, take it as the original
+    float want = base[k] * powf(1.25f, (float)g_map_zoom_step[k]); if (*z != want) *z = want; ours[k] = want;
+}
 void dm_ui_map_hold(int on) { atomic_store(&g_map_hold, on != 0); }
 int dm_ui_map_is_full(void) { return atomic_load(&g_map_full_now); }
+// 画面此刻是不是全屏地图，不论档位（手柄模式全屏档时 dm_ui_map_is_full 照旧报 0，各端点小地图的老行为不变）；Mac 手柄键位的 MAPSIZE 动作用它定切哪边
+// Whether the map on screen is fullscreen right now, whatever the setting (in controller mode with the full-screen setting dm_ui_map_is_full still reports 0, so every front end's minimap tap keeps its old behavior); the Mac controller remap's MAPSIZE action uses it to pick the direction
+int dm_ui_map_shown_full(void) { return atomic_load(&g_map_full_raw); }
 // 真全屏局内，全屏地图的线条要盖在世界上：游戏把地图中心放在「屏幕高的一半」（它读到的是我们写的 16:9 界面高），画出来在 界面矩形 y + 界面高 ÷ 2；
 // 世界的中心在真实画面高的一半，两者差 界面矩形 y −（真实高 − 界面高）÷ 2（贴底时 = 留边高度的一半，地图标记比人低约 128 点）。
 // 地图有一对卷动量 [main+0x2d5e910 / 914]（单位 = 地图格；中心 = 玩家所在格 + 卷动量，main+0x413354 / 0x4133d8；游戏只在切档等处清零，触摸 / 手柄下没有别的写入方），
@@ -1955,11 +1978,25 @@ int dm_ui_map_is_full(void) { return atomic_load(&g_map_full_now); }
 // The map has a pair of scroll values [main+0x2d5e910 / 914] (unit = map cells; center = the player's cell + scroll, main+0x413354 / 0x4133d8; the game only zeroes them on mode switches and the like, and there is no other writer under touch / controller),
 // and the vertical one is written as the number of cells corresponding to "move up by this distance". Screen pixels per cell follow the game's own algorithm (0x413280–0x413298): max(⌈panel scale × [panel+0x15a8] × 8⌉ ÷ 8, 1/8) × [main+0x2d5e91c],
 // with panel scale obtained by calling the game's main+0x390b38(panel). Written only for the fullscreen map (not mini) when the UI rect is shifted down; in all other cases the value we wrote is cleared. The top-right minimap uses the top-lift and does not need this.
+// Mac 手柄键位的地图平移（dm_gamepad.m 按着时每 30 毫秒叫一次）：玩家自己的卷动量（格，横 = +0x910、纵 = +0x914，正值 = 地图往右 / 往下走（实测）），加在上面的纵向修正上；
+// 换档时游戏把卷动量清零，下一帧这里照样写回（平移留着），MAPCENTER 或出局才归零。±400 格封顶
+// The Mac controller remap's map panning (dm_gamepad.m calls it every 30 ms while held): the player's own scroll (cells, horizontal = +0x910, vertical = +0x914, positive = the map moves right / down (measured)), added on top of the vertical correction above;
+// when the mode changes the game zeroes the scroll and the next frame writes it back here (panning is kept); it returns to zero only on MAPCENTER or leaving the run. Capped at ±400 cells
+static _Atomic int g_map_pan_dx, g_map_pan_dy, g_map_pan_reset;
+static int g_map_pan_x, g_map_pan_y;   // 主线程独用 | main thread only
+void dm_ui_map_pan(int dx, int dy) { atomic_fetch_add(&g_map_pan_dx, dx); atomic_fetch_add(&g_map_pan_dy, dy); }
+void dm_ui_map_pan_reset(void) { atomic_store(&g_map_pan_reset, 1); }
 static void ui_map_center(module_t *m, uint64_t root, int mini) {
-    static int ours; int32_t *sc = (int32_t *)(m->base + 0x2d5e914); int want = 0;
+    static int ours, ours_x; int32_t *sc = (int32_t *)(m->base + 0x2d5e914), *sx = (int32_t *)(m->base + 0x2d5e910); int want = 0;
+    { int dx = atomic_exchange(&g_map_pan_dx, 0), dy = atomic_exchange(&g_map_pan_dy, 0), rs = atomic_exchange(&g_map_pan_reset, 0);
+      if (rs || !dm_uiscreen_ingame()) { if (rs && (g_map_pan_x || g_map_pan_y)) LOG("地图平移：归零"); g_map_pan_x = g_map_pan_y = 0; }
+      else if (dx || dy) { g_map_pan_x += dx; g_map_pan_y += dy; if (g_map_pan_x < -400) g_map_pan_x = -400; if (g_map_pan_x > 400) g_map_pan_x = 400; if (g_map_pan_y < -400) g_map_pan_y = -400; if (g_map_pan_y > 400) g_map_pan_y = 400; } }
+    if (*sx != g_map_pan_x && (*sx == ours_x || *sx == 0)) *sx = g_map_pan_x;
+    if (*sx == g_map_pan_x) ours_x = g_map_pan_x;
     int x, y, w, h, rw = 0, rh = 0; dm_ui_rect(&x, &y, &w, &h); uint64_t am = !mini && dm_uiscreen_ingame() && dm_screen_real(&rw, &rh) && h > 0 && h < rh ? ui_panel(root, "AutoMap") : 0;
     if (am && *(uint64_t *)am == (uint64_t)m->base + 0x20c58a0) { float q = ceilf(((float (*)(uint64_t))(m->base + 0x390b38))(am) * *(float *)(am + 0x15a8) * 8) / 8; if (q < 0.125f) q = 0.125f;
         float cell = q * *(float *)(m->base + 0x2d5e91c); if (cell > 0.1f) want = (int)lroundf((y - (rh - h) / 2.0f) / cell); }
+    want += g_map_pan_y;
     if (*sc == want || (*sc != ours && *sc != 0)) { if (*sc == want) ours = want; return; }   // 已是目标值；或是别人写的非零值（不是我们上次写的）：不动 | Already the target value; or a non-zero value written by someone else (not what we last wrote): leave it alone
     { static int lg; if (lg++ < 8) LOG("全屏地图中心：纵向卷动量 %d → %d 格", *sc, want); } *sc = want; ours = want;
 }
@@ -1983,7 +2020,7 @@ static void ui_map_pump(module_t *m, uint64_t root) {
     // tick, and with no ticks after leaving it stays at its last value 1. Out-of-run switch requests are dropped too, not carried into the next run.
     if (!dm_uiscreen_ingame()) {
         int pending = atomic_exchange(&g_map_req, -1);
-        atomic_store(&g_map_full_now, 0);
+        atomic_store(&g_map_full_now, 0); atomic_store(&g_map_full_raw, 0);
         if (pending >= 0) { static int n; if (n++ < 4) LOG("地图：局外的切换请求已丢掉（局外不调原版地图切换）"); }
         return;
     }
@@ -1993,22 +2030,27 @@ static void ui_map_pump(module_t *m, uint64_t root) {
     { static long at = -1; static int tv; uint64_t fr = dm_guest_frame(); if (at < 0) { const char *e = getenv("DM_TEST_AUTOMAP"); at = e ? atol(e) : 0; const char *c = e ? strchr(e, ':') : NULL; tv = c ? atoi(c + 1) : 0; }
       if (at > 0 && fr >= (uint64_t)at) { at = 0; *(volatile int32_t *)(m->base + 0x2d479f4) = tv; ((void (*)(int))(m->base + 0x40f780))(tv); cfg = tv; mini = *(volatile int32_t *)(m->base + 0x2d5c748); LOG("测试 DM_TEST_AUTOMAP：帧 %llu 把「透视地图尺寸」改成 %d", (unsigned long long)fr, tv); } }
     int dm_padmode_current(void); dm_hud_info hi; dm_hud_get(&hi);
+    if (atomic_exchange(&g_map_pos_req, 0)) {   // 小地图放左 ↔ 放右 | minimap left <-> right
+        if (cfg == 1 || cfg == 2) { cfg = 3 - cfg; *(volatile int32_t *)(m->base + 0x2d479f4) = cfg; g_map_cfg_seen = cfg; if (mini) ((void (*)(int))(m->base + 0x40f780))(cfg); }
+        else { g_map_side0 = 3 - g_map_side0; if (mini) ((void (*)(int))(m->base + 0x40f780))(g_map_side0); }
+        mini = *(volatile int32_t *)(m->base + 0x2d5c748); LOG("地图位置：小地图 → %s（配置值 %d）", (cfg == 1 || (cfg == 0 && g_map_side0 == 1)) ? "放左" : "放右", cfg); }
+    ui_map_zoom_pump(m, root, mini);
     int r = atomic_exchange(&g_map_req, -1);
-    if (dm_padmode_current()) {   // 手柄模式是原版界面：三档照原版，只有微缩档能临时切全屏 | controller mode is the original UI: the three settings work as in the original game, and only the minimap settings can switch to full screen temporarily
-        if (r >= 0) {
-            if (cfg != 1 && cfg != 2) { static int n; if (n++ < 4) LOG("地图切换：玩家的「透视地图尺寸」是 %d（不是微缩档），不切", cfg); }
-            else if ((mini == 0) != r) { ((void (*)(int))(m->base + 0x40f780))(r ? 0 : cfg); mini = *(volatile int32_t *)(m->base + 0x2d5c748); LOG("地图切换：→ %s（配置值 %d 不动，不落盘）", r ? "全屏" : cfg == 1 ? "微缩放左" : "微缩放右", cfg); }
-        }
-        atomic_store(&g_map_full_now, mini == 0 && (cfg == 1 || cfg == 2)); return;
+    // 手柄模式是原版界面：三档照原版，切换请求（如 Mac 手柄键位的 MAPSIZE 动作，dm_gamepad.m）照办；配置是全屏档时切回去用微缩放右（同触屏），换区域后游戏照配置重建
+    // controller mode is the original UI: the three settings work as in the original game; switch requests (such as the Mac controller remap's MAPSIZE action, dm_gamepad.m) are carried out; with the config on full screen, switching back uses minimap right (as in touch), and an area change rebuilds from the config
+    if (dm_padmode_current()) {
+        int small = cfg == 1 ? 1 : cfg == 2 ? 2 : g_map_side0;
+        if (r >= 0 && (mini == 0) != r) { ((void (*)(int))(m->base + 0x40f780))(r ? 0 : small); mini = *(volatile int32_t *)(m->base + 0x2d5c748); LOG("地图切换：→ %s（配置值 %d 不动，不落盘）", r ? "全屏" : small == 1 ? "微缩放左" : "微缩放右", cfg); }
+        atomic_store(&g_map_full_now, mini == 0 && (cfg == 1 || cfg == 2)); atomic_store(&g_map_full_raw, mini == 0); return;
     }
     if (cfg != g_map_cfg_seen) {   // 每局第一次读到配置、或玩家在选项页改了档：要不要全屏跟配置走 | first config read in a run, or the player changed the setting on the options page: whether to show the full-screen map follows the config
         g_map_want = cfg == 0; { static int n; if (n++ < 8) LOG("地图：「透视地图尺寸」读到 %d → 触屏下%s", cfg, cfg == 0 ? "缺省全屏地图（点右上角那一块回小地图）" : "缺省小地图"); } g_map_cfg_seen = cfg; }
     if (r >= 0 && g_map_want != r) { g_map_want = r; LOG("地图：玩家点了 → 记住%s", r ? "全屏地图" : "小地图"); }
-    int small = cfg == 1 ? 1 : 2, hold = atomic_load(&g_map_hold), want = g_map_want == 1 && !hold;   // 全屏档时小地图按微缩放右显示 | with the full-screen setting, the minimap is shown as minimap right
+    int small = cfg == 1 ? 1 : cfg == 2 ? 2 : g_map_side0, hold = atomic_load(&g_map_hold), want = g_map_want == 1 && !hold;   // 全屏档时小地图按微缩放右显示 | with the full-screen setting, the minimap is shown as minimap right
     if (hi.valid && (mini == 0) != want) {   // 局外已在函数开头返回；valid 只保证读得到玩家。换区域后游戏按配置重建、开关面板，都在这里对回去 | out of a run already returned at the top; valid only means the player is readable. After an area change the game rebuilds from the config, and panels open / close: both are put right here
         ((void (*)(int))(m->base + 0x40f780))(want ? 0 : small); mini = *(volatile int32_t *)(m->base + 0x2d5c748);
         static int n; if (n++ < 40) LOG("地图：→ %s（%s；配置值 %d 不动）", want ? "全屏" : small == 1 ? "微缩放左" : "微缩放右", hold ? "面板开着先让开" : g_map_want ? "玩家要全屏" : "玩家要小地图", cfg); }
-    atomic_store(&g_map_full_now, mini == 0);
+    atomic_store(&g_map_full_now, mini == 0); atomic_store(&g_map_full_raw, mini == 0);
     { void dm_ui_key_pulse_alone(uint64_t mask, int frames); uint64_t am = ui_panel(root, "AutoMap"); static uint64_t sent;
       if (am && *(uint64_t *)am == (uint64_t)m->base + 0x20c58a0 && !*(uint8_t *)(am + 0x50) && *(volatile int32_t *)(m->base + 0x2d485b4) && hi.valid && dm_uiscreen_ingame() && !atomic_load(&g_map_movie)) {
           uint64_t fr = dm_guest_frame(); if (!sent || fr >= sent + 120) { sent = fr; dm_ui_key_pulse_alone(DM_BTN_MINUS, 4); LOG("地图：局内小地图关着（过场关的）、选项「进局自动开启地图」开着 → 替玩家按一下地图键（−）"); } } }

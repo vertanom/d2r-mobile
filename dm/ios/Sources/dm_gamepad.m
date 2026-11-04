@@ -23,6 +23,8 @@
 #import <GameController/GameController.h>
 #include "dm_input.h"
 #include "dm_padmap.h"
+#include "dm_padbind.h"
+#include <sys/stat.h>
 #include "hle.h"
 
 static void (*g_on_mode)(int pad);
@@ -41,6 +43,45 @@ static int slot_of(const void *who, int make) { int fr = -1; for (int i = 0; i <
 
 static int32_t axis(float v) { if (v > 1) v = 1; if (v < -1) v = -1; return (int32_t)lroundf(v * DM_STICK_MAX); }
 static int stick_on(int was, int32_t x, int32_t y) { double m = hypot(x, y) / DM_STICK_MAX; return was ? m >= 0.15 : m >= 0.25; }   // 迟滞：推过 25% 算推出，回到 15% 内算回中 | Hysteresis: past 25% counts as pushed out, back within 15% counts as centered
+#if TARGET_OS_OSX
+// Mac：实体键 → 游戏键的重映射表（dm_padbind.h），文件 pad_remap.txt 与 sw_custom.txt 同目录；没有文件 = 原样。
+// 文件改了（时间戳变）在下一次手柄输入时重读，不用重启；读不懂的文件整份不生效、沿用上一份，日志说原因。
+// Mac: physical -> game button remap table (dm_padbind.h), file pad_remap.txt next to sw_custom.txt; no file = unchanged.
+// When the file changes (timestamp) it is re-read on the next controller input, no restart needed; a file that does not parse is ignored as a whole, the previous table stays, and the log says why.
+static dm_padbind_table g_bind; static dm_padbind_state g_bind_st; static int g_bind_init; static uint64_t g_bind_next;
+static void bind_reload(uint64_t held) {
+    static struct timespec seen; uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000, next = g_bind_next;
+    if (!g_bind_init) { dm_padbind_identity(&g_bind); g_bind_init = 1; } else if (now < next) return;
+    g_bind_next = now + 500;
+    const char *dm_custom_dir(void); const char *dir = dm_custom_dir(); if (!dir) return;
+    char p[1100]; snprintf(p, sizeof p, "%s/pad_remap.txt", dir); struct stat sb;
+    if (stat(p, &sb)) { if (seen.tv_sec || seen.tv_nsec) { memset(&seen, 0, sizeof seen); dm_padbind_identity(&g_bind); dm_padbind_reset(&g_bind_st, held); LOG("手柄键位：pad_remap.txt 没了 → 原样"); } return; }
+    if (sb.st_mtimespec.tv_sec == seen.tv_sec && sb.st_mtimespec.tv_nsec == seen.tv_nsec) return;
+    seen = sb.st_mtimespec;
+    NSString *txt = [NSString stringWithContentsOfFile:@(p) encoding:NSUTF8StringEncoding error:nil]; dm_padbind_table t;
+    if (!txt || !dm_padbind_parse(txt.UTF8String, &t)) { LOG("【红】手柄键位：%s 读不懂，沿用上一份", p); return; }
+    g_bind = t; dm_padbind_reset(&g_bind_st, held);
+    LOG("手柄键位：读入 %s（%s，分段 %d 毫秒）", p, dm_padbind_is_identity(&t) ? "原样" : "有改动", t.stage_ms);
+}
+static void apply(void);
+// 地图平移按住一直走：每 30 毫秒挪 6 格，松开（acts 里没有平移了）就停。方向实测（2026-11-03）：卷动量为正时地图往右 / 往下走，所以「地图往左」给负值 | Map panning keeps moving while held: 6 cells every 30 ms, stops once released (no panning left in acts). Direction measured (2026-11-03): a positive scroll moves the map right / down, so "map left" is negative
+static int g_pan_running;
+static void pan_tick(void) {
+    uint64_t a = g_bind_st.acts; int dx = !!(a & DM_PADACT_MAPRIGHT) - !!(a & DM_PADACT_MAPLEFT), dy = !!(a & DM_PADACT_MAPDOWN) - !!(a & DM_PADACT_MAPUP);
+    if (!dx && !dy) { g_pan_running = 0; return; }
+    void dm_ui_map_pan(int dx, int dy); dm_ui_map_pan(dx * 6, dy * 6);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ pan_tick(); });
+}
+// 键位窗口（host/padbind_mac.m）点了「应用」：马上重读文件、按新表放掉按着的键，不等下一次手柄输入
+// The controller buttons window (host/padbind_mac.m) pressed Apply: re-read the file now and release held buttons by the new table, without waiting for the next controller input
+void dm_gamepad_remap_reload(void) { dispatch_async(dispatch_get_main_queue(), ^{ g_bind_next = 0; apply(); }); }
+// 键位窗口「设定…」：等手柄上按一颗键或一个组合，交给 cb(修饰键位, 触发键位 0–15)，不交给游戏；cb = NULL 取消。
+// 组合 = 按着修饰键再按触发键：全部松开时才定，最后按下的那颗是触发键、之前按着的是修饰键；单按一颗 = 没有修饰键。等的时候所有键都不进游戏；开始等时已经按着的键不算。只在主线程调。
+// Controller buttons window "Set…": wait for one button or a combo on the controller and hand it to cb(modifier bits, trigger bit 0-15) instead of the game; cb = NULL cancels.
+// Combo = hold the modifiers then press the trigger: decided when everything is released, the last button pressed is the trigger and those held before it are the modifiers; a single press = no modifiers. While waiting no button reaches the game; buttons already held when waiting starts do not count. Main thread only.
+static void (^g_capture)(uint64_t mods, int bit); static uint64_t g_raw_b, g_cap_acc; static int g_cap_last;
+void dm_gamepad_capture(void (^cb)(uint64_t mods, int bit)) { g_capture = cb; g_cap_acc = 0; g_cap_last = -1; }
+#endif
 // 把各手柄合起来、定模式、交给宿主。任何一份变了都重算一遍
 // Merge all controllers, decide the mode and hand the result to the host. Recompute whenever any one of them changes
 static void apply(void) {
@@ -52,7 +93,33 @@ static void apply(void) {
     if (!on[0] && !on[1]) g_need_center = 0;   // 碰过屏幕后摇杆回过中了：之后再推出来算数 | The stick has returned to center since the screen was touched: pushing it out again from now on counts
     if ((b & ~prev_b) || ((on[0] || on[1]) && !g_need_center)) { dm_padmode_request_glyph(g_glyph); set_mode(1); }   // 先报键帽样式再要手柄版：同一次切换里就换成这只手柄的键帽（Mac App 上也是从键盘键帽换回手柄键帽） | Report the glyph style before asking for the controller layout, so the same switch already uses this controller's glyphs (on the Mac App this is also the switch from keyboard glyphs back to controller glyphs)
     prev_b = b;
-    if (!g_pad_mode || !on[0]) ax[0] = ax[1] = 0; if (!g_pad_mode || !on[1]) ax[2] = ax[3] = 0;   // 触屏模式不交摇杆；手柄模式下没推出来的给 0 | Sticks are not delivered in touch mode; in controller mode a stick that is not pushed out gives 0
+    if (!g_pad_mode || !on[0]) ax[0] = ax[1] = 0; if (!g_pad_mode || !on[1]) ax[2] = ax[3] = 0;
+#if TARGET_OS_OSX
+    // 重映射在免费回城之前：那一段看的是游戏要收到的 ZL / ZR。菜单里新按下的键原样（翻页签）。
+    // Mac 的 dm_front_navigation 恒为 1（app_mac.m），局内 / 面板用触摸层自己的判断 dm_touch_host_world_active（局内、没开面板、没暂停）
+    // Remapping happens before the free town portal: that block looks at the ZL / ZR the game will receive. In menus newly pressed buttons stay unchanged (tab switching).
+    // On the Mac dm_front_navigation is always 1 (app_mac.m), so in-run / panel state comes from the touch layer's own dm_touch_host_world_active (in a run, no panel, not paused)
+    { int dm_touch_host_world_active(void), dm_uiscreen_panel(void), wake = -1, menu = !dm_touch_host_world_active() || dm_uiscreen_panel(); static int last_menu = -1; bind_reload(b);
+      // 等着设定：每一下都把按着的键记为「松开前不算」，所以等的时候都不进游戏；全松开时定下按过的组合 | Waiting for Set: every call marks the held buttons "ignored until released", so nothing reaches the game while waiting; the combo is decided once everything is released
+      { uint64_t raw = b & ((1ull << DM_PADBIND_N) - 1), fresh = raw & ~g_raw_b; g_raw_b = raw;
+        if (g_capture) { dm_padbind_reset(&g_bind_st, raw);
+          for (int i = 0; i < DM_PADBIND_N; i++) if (fresh & 1ull << i) { g_cap_last = i; g_cap_acc = raw & ~(1ull << i); }   // 最后按下的是触发键，那一刻还按着的是修饰键 | the last press is the trigger; whatever is still held at that moment is the modifiers
+          if (!raw && g_cap_last >= 0) { void (^cb)(uint64_t, int) = g_capture; uint64_t mods = g_cap_acc; int bit = g_cap_last; g_capture = nil;
+            LOG("手柄键位：设定抓到 %s（修饰键位 0x%llx）", dm_padbind_names[bit], (unsigned long long)mods); dispatch_async(dispatch_get_main_queue(), ^{ cb(mods, bit); }); } } }
+      if (menu != last_menu && !dm_padbind_is_identity(&g_bind)) { static int n; if (n++ < 20) LOG("手柄键位：%s", menu ? "菜单 / 面板 → 新按的键原样" : "局内 → 按表重映射"); } last_menu = menu;
+      b = dm_padbind_step(&g_bind, &g_bind_st, b, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000, menu, g_bind.stage_ms, &wake);
+      // 表里的宿主动作：按下那一刻执行一次，不发给游戏 | Host actions from the table: run once at the moment they go down, never sent to the game
+      if (g_bind_st.fired) { uint64_t f = g_bind_st.fired; g_bind_st.fired = 0; void dm_ui_map_full(int on), dm_tp_request(void); int dm_ui_map_shown_full(void);
+        if (f & DM_PADACT_MAPSIZE) { int on = !dm_ui_map_shown_full(); dm_ui_map_full(on); LOG("手柄键位：动作 MAPSIZE → %s", on ? "全屏地图" : "小地图"); }
+        if (f & DM_PADACT_TOWNPORTAL) { dm_tp_request(); LOG("手柄键位：动作 TOWNPORTAL → 免费回城"); }
+        { void dm_ui_map_pos_toggle(void), dm_ui_map_zoom(int d);
+          if (f & DM_PADACT_MAPPOS) dm_ui_map_pos_toggle();
+          if (f & DM_PADACT_MAPZOOMIN) dm_ui_map_zoom(1);
+          if (f & DM_PADACT_MAPZOOMOUT) dm_ui_map_zoom(-1);
+          if (f & DM_PADACT_MAPCENTER) { void dm_ui_map_pan_reset(void); dm_ui_map_pan_reset(); } } }
+      if (!g_pan_running && (g_bind_st.acts & (DM_PADACT_MAPLEFT | DM_PADACT_MAPRIGHT | DM_PADACT_MAPUP | DM_PADACT_MAPDOWN))) { g_pan_running = 1; pan_tick(); }
+      if (wake >= 0) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wake + 1) * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ apply(); }); }
+#endif   // 触屏模式不交摇杆；手柄模式下没推出来的给 0 | Sticks are not delivered in touch mode; in controller mode a stick that is not pushed out gives 0
     // ZR：原版六个技能格之一。这一格空着（没绑技能）时按它 = 免费回城（手柄玩家也免费回城，与触屏回城钮一致）；绑了技能就整颗交还原版（不再整颗占用）。
     // 想把回城放在别的键上：原版选技能界面「综合技能」里有回城技能可绑（宿主进局时挂上的，dm_freetp.c），那条走原版自己的施放，不经这里。
     // 只在游戏态接管：面板开着时 ZR 照常交给原版（储藏箱 / 编年史用 ZL / ZR 翻页签）；按下时在游戏态接管的那一下，到松开前都不交给游戏
@@ -110,6 +177,12 @@ static void attach(GCController *c) {
 }
 void dm_gamepad_start(void (*on_mode)(int pad)) {
     g_on_mode = on_mode;
+#if TARGET_OS_OSX
+    // Mac：窗口没焦点时手柄照样进游戏（系统缺省只给前台 App）。defaults write <包标识> PadInBackground -bool NO 关掉
+    // Mac: the gamepad keeps reaching the game while its window is not focused (by default the system only feeds the frontmost app). defaults write <bundle id> PadInBackground -bool NO turns it off
+    { NSUserDefaults *d = NSUserDefaults.standardUserDefaults; BOOL bg = [d objectForKey:@"PadInBackground"] ? [d boolForKey:@"PadInBackground"] : YES;
+      GCController.shouldMonitorBackgroundEvents = bg; LOG("手柄：后台输入%s", bg ? "开" : "关（PadInBackground=NO）"); }
+#endif
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
     [nc addObserverForName:GCControllerDidConnectNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n) { attach(n.object); }];
     [nc addObserverForName:GCControllerDidDisconnectNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n) {

@@ -79,6 +79,7 @@ SRC=\
 	dm_prof.c \
 	thread.c \
 	touch_mac.c \
+	padbind_mac.m \
 	../ios/Sources/cloud_ios.m \
 	../ios/Sources/dm_gamepad.m \
 	../ios/Sources/dm_rift_hud.m \

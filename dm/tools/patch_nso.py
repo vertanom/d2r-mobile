@@ -175,6 +175,22 @@ if RULE_RUN:
     assert BUILD_ID == RULE_BUILD, f'Run规则构建号不符 {BUILD_ID}'
     RULE_ORIG_SHA = hashlib.sha256(IMG).hexdigest()
 cuts = list(CUTS.get(BUILD_ID, []))
+# 共享仓库页数（DM_SHARED_PAGES=<页数>，这条分支缺省 20；=5 = 原版）：原版页数 = 3 + 0x1d2ce0() + 2·(模式字节 [0x2127c48] == 3)，同一式子在 0x1d2ce0 的 7 个调用点（8 条 add #3）：
+#   界面页码 0x394ec0 / 0x3988f0 / 0x3996ec、服务端建页表 0x55ed88（按 N 分配）与遍历 0x55ee6c、读档补空页 0x6fdf60 / 0x6fdf8c、共享金币上限 0xc55a44（250 万 × N）。
+#   把 #3 换成 #(3 + 页数 − 5)，8 处一起换（只换一部分会让界面、服务端、读档的页数不一致）。只有 main 里这些字节对得上，其余模块不动。
+#   注意：多出的页存进共享仓库档 .d2i；用页数少的构建打开同一份档，多出的页大概率被丢弃——两台设备要同样的页数。缺省设成 20：忘了带变量重出产物，也不会出一个丢页的包。
+# Shared stash page count (DM_SHARED_PAGES=<pages>, default 20 on this branch; =5 = original): original count = 3 + 0x1d2ce0() + 2·(mode byte [0x2127c48] == 3), the same expression at the 7 call sites of 0x1d2ce0 (8 add #3):
+#   UI page number 0x394ec0 / 0x3988f0 / 0x3996ec, server page table 0x55ed88 (allocated by N) and its walk 0x55ee6c, loading fills empty pages 0x6fdf60 / 0x6fdf8c, shared gold cap 0xc55a44 (2.5 million × N).
+#   #3 becomes #(3 + pages − 5), all 8 together (changing only some would make UI, server and loading disagree on the count). Only main matches these bytes; other modules are untouched.
+#   Caution: the extra pages are stored in the shared stash file .d2i; opening the same file with a build that has fewer pages most likely drops the extra pages - both devices need the same count. Default 20: rebuilding without the variable still cannot produce a build that drops pages.
+SHARED_PAGES = int(os.environ.get('DM_SHARED_PAGES', '20'))
+SHARED_PAGE_ADDS = (0x394ec0, 0x3988f0, 0x3996ec, 0x55ed88, 0x55ee6c, 0x6fdf60, 0x6fdf8c, 0xc55a44)
+if SHARED_PAGES != 5 and struct.unpack_from('<I', IMG, SHARED_PAGE_ADDS[0])[0] == 0x11000D00:   # 只有 main 的这个地址是 add w0,w8,#3 | only main has add w0,w8,#3 here
+    assert all(struct.unpack_from('<I', IMG, a)[0] & 0x5FFFFC00 == 0x11000C00 for a in SHARED_PAGE_ADDS), '共享仓库页数：8 处不全是 add/adds #3'   # 0x5F…：add 与 adds（位 29）都认 | 0x5F...: matches both add and adds (bit 29)
+    assert 5 <= SHARED_PAGES <= 60, f'DM_SHARED_PAGES 超出范围：{SHARED_PAGES}'
+    for a in SHARED_PAGE_ADDS:
+        w = struct.unpack_from('<I', IMG, a)[0]
+        cuts.append((a, struct.pack('<I', w).hex(), struct.pack('<I', (w & ~(0xFFF << 10)) | ((3 + SHARED_PAGES - 5) << 10)).hex(), f'共享仓库页数 5 → {SHARED_PAGES}：add #3 → #{3 + SHARED_PAGES - 5}'))
 # 触屏版规则域默认同时带宿主私有门；规则闸门可显式关闭，保留同一出包入口和规则域。
 # The touchscreen rule domain by default also carries the host-private gates; the rule gate check can turn them off explicitly, keeping the same packaging entry point and rule domain.
 PRIVATE_GATES = os.environ.get("DM_PRIVATE_GATES", "1") != "0"

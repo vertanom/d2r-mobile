@@ -91,6 +91,7 @@ const char *dm_save_commitdir(void);
 static int key_index(const char *k) { if (k) for (int i = 0; i < NK; i++) if (!strcmp(k, k_keys[i])) return i; return -1; }
 static char g_dir[1024];   // iOS 外壳启动时给的 Documents（main.m）：启动期（存档挂上之前）就要能读，覆盖层选择用 | Documents given by the iOS shell at startup (main.m): must be readable already during startup (before the save is mounted), used for overlay selection
 void dm_custom_init(const char *dir) { if (dir) strlcpy(g_dir, dir, sizeof g_dir); }
+const char *dm_custom_dir(void) { return g_dir[0] ? g_dir : NULL; }
 static int file_path(char *p, size_t n) {
     if (g_dir[0]) { snprintf(p, n, "%s/sw_custom.txt", g_dir); return 1; }
     const char *c = dm_save_commitdir(); if (!c) return 0; snprintf(p, n, "%s/../sw_custom.txt", c); return 1; }
