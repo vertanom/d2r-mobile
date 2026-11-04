@@ -146,6 +146,13 @@ CUTS = {'db0507f36b84200ac05f75d76ed5026f': [
     (0x5d8040, 'a005fe97', '411100d4', '玩家进局取出生点调用点 bl 0x5596c0 → svc #0x8a：宿主原样代调，进局在城镇时出生点换成小站旁（hle.h SVC_HOST_JOIN_SPAWN）', '仅宿主'),
     (0x5d8400, 'b004fe97', '611100d4', '进局给尸体取落点调用点 bl 0x5596c0 → svc #0x8b：同上，尸体与人取同一个点（hle.h SVC_HOST_JOIN_CORPSE）', '仅宿主'),
     (0x11f0914, '77100094', '811000d4', '段读取 0x11f07d0 逐块解码 bl 0x11f4af0(ctx, 块, 长度) → svc #0x84：同上（hle.h SVC_HOST_GRANNY_B）', '仅宿主'),
+    # 客户端收「物品放进容器」（收包分派 0x2ee9a0 → 0x469f00 → 0x46a490）：放进本地玩家的容器（页 ≠ 1）后，原版不管放的是哪件，光标上有物品就 0x55e430 摘掉——
+    # 原版只有「从光标放下」才会放进玩家容器，所以光标上的一定是这件。宿主放件（个人仓库翻页 dm_pages.c、编年史取出、百宝囊、iCloud 并回）不经光标：
+    # 实测翻页放回 17 件，客户端手上的物品被摘掉、服务端光标还挂着（两端不一致，重开才回来；lldb 观察点停在 0x46a77c）。改成只在光标上那件就是放进来的这件（x20）时才摘
+    # Client receiving 'item put into a container' (packet dispatch 0x2ee9a0 -> 0x469f00 -> 0x46a490): after putting into the local player's container (page != 1), the original removes whatever is on the cursor with 0x55e430, whichever item was put --
+    # in the original only 'put down from the cursor' puts into the player's containers, so the cursor item is always this one. Host placements (personal stash page turns dm_pages.c, chronicle withdraw, pouch, iCloud merge) do not go through the cursor:
+    # measured, a page turn putting back 17 items removed the item from the client's hand while the server cursor still held it (the two sides disagreed until a restart; lldb watchpoint stopped at 0x46a77c). Now removed only when the cursor item is the item just put (x20)
+    (0x46a768, '080040b91f110071', '1f0014eb01010054', '客户端放进玩家容器后摘光标物品：ldr w8,[x0]; cmp w8,#4（光标上是物品就摘）→ cmp x0,x20; b.ne 0x46a78c（光标上的就是放进来的这件才摘）', '仅宿主'),
 ]}
 # ---- 已登记观测门：{NSO 构建号: [(偏移, 编号, 原指令字, 理由)]}。编号与宿主 hle.h 的 OBS_* 一致；
 # 原指令须与位置无关（不得 PC 相对 / 分支 / 涉 x18·tpidr），离线断言；宿主未挂回调时门块进出一次即返回 ----

@@ -34,6 +34,7 @@ run: \
 	$(B)/t_namegen \
 	$(B)/t_oe \
 	$(B)/t_padmap \
+	$(B)/t_pages \
 	$(B)/t_padbind \
 	$(B)/t_rift_clock \
 	$(B)/t_rift_hud \
@@ -101,6 +102,7 @@ run: \
 	$(B)/t_modetx
 	$(B)/t_padmap
 	$(B)/t_padbind
+	$(B)/t_pages
 	$(B)/t_unit_level
 	$(B)/t_widget
 	$(B)/t_doorspot
@@ -128,6 +130,8 @@ $(B)/t_padmap: t_padmap.c ../dm_padmap.h ../dm_input.h | $(B)
 	clang -O1 -Wall -Werror -o $@ t_padmap.c
 $(B)/t_padbind: t_padbind.c ../dm_padbind.h ../dm_input.h | $(B)
 	clang -O1 -Wall -Werror -o $@ t_padbind.c
+$(B)/t_pages: t_pages.c ../dm_pages.c ../dm.h | $(B)
+	clang -O1 -Wall -Werror -Wno-unused-function -I.. -Wl,-dead_strip -o $@ t_pages.c
 $(B)/t_minimap_lift: t_minimap_lift.c ../dm_cursor.c ../dm_cursor.h | $(B)
 	clang -O1 -Wall -Werror -Wno-unused-function -I.. -Wl,-dead_strip -o $@ t_minimap_lift.c
 $(B)/t_widestash_restore: t_widestash_restore.c ../dm_cursor.c ../dm_cursor.h | $(B)
