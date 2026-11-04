@@ -74,6 +74,7 @@ void dm_item_identify(unsigned id) { (void)id; }
 void dm_item_target_cancel(void) {}
 void dm_elysium_arm(int on) { (void)on; }   // 极乐世界勾选（dm_elysium.c）：单测里空桩 | Elysium checkbox (dm_elysium.c): empty stub in the unit test
 void dm_custom_on_uimsg(const char *cat, const char *act, const char *arg) { (void)cat; (void)act; (void)arg; }   // 「自定义」设置（dm_custom.c）的桩 | stub for the "Custom" settings (dm_custom.c)
+const char *dm_custom_dir(void) { return 0; }   // 自定义目录（dm_custom.c）：单测里没有，地图状态 map_view.txt 不读不写 | Custom directory (dm_custom.c): none in the unit test, so map_view.txt is neither read nor written
 void dm_test_stash_take(int n) { (void)n; }
 void dm_stash_take(int n) { (void)n; }
 float dm_ui_ny(float ny) { return ny; }
