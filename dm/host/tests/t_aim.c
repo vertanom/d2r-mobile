@@ -27,6 +27,14 @@ int main(void) {
     CHECK(!dm_aim_free_listed(DM_AIM_ZONE, 59, get) && dm_aim_free_listed(DM_AIM_ZONE, 56, get), "zone=1 开落点类，skill_59=0 单独关掉");
     g_txt = "skill_13=1\n";
     CHECK(!dm_aim_free_listed(DM_AIM_SHOT, 1, get), "skill_1 不会误认成 skill_13");
+    // 不选怪：位移类缺省一直，其余只在自由瞄准开着时 | No target pick: movement always by default, the rest only while free aim is on
+    g_txt = "";
+    CHECK(dm_aim_ignore_target(DM_AIM_MOVE, 132, 0, get), "位移类没开自由瞄准也不选怪（缺省 move_always=1）");
+    CHECK(!dm_aim_ignore_target(DM_AIM_SHOT, 0, 0, get) && !dm_aim_ignore_target(DM_AIM_ZONE, 59, 0, get), "其余类别没开自由瞄准 = 原生");
+    g_txt = "move_always=0\n";
+    CHECK(!dm_aim_ignore_target(DM_AIM_MOVE, 132, 0, get) && dm_aim_ignore_target(DM_AIM_MOVE, 132, 1, get), "move_always=0：位移类回到只在自由瞄准时");
+    g_txt = "skill_143=0\n";
+    CHECK(!dm_aim_ignore_target(DM_AIM_MOVE, 143, 0, get) && dm_aim_ignore_target(DM_AIM_MOVE, 132, 0, get), "skill_143=0 单独关掉一个位移技能");
     // 幅度 → 比例 | Push -> fraction
     CHECK(dm_aim_frac(0.1f) == 0 && dm_aim_frac(0.25f) == 0 && dm_aim_frac(1.0f) == 1 && dm_aim_frac(0.95f) == 1, "死区内 0，推满 1");
     CHECK(dm_aim_frac(0.6f) > 0.49f && dm_aim_frac(0.6f) < 0.51f, "推到 0.6 ≈ 一半");

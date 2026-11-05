@@ -25,5 +25,13 @@ static inline int dm_aim_free_listed(int cls, int skill, int (*get)(const char *
     if (cls == DM_AIM_SHOT) return get("shot", 0) != 0;
     return 0;
 }
+// 这一下施放要不要不选怪：位移类缺省一直不选（move_always=1，Victor 2026-11-04：跳跃按住左摇杆跳满射程、不推就原地跳，其余位移技能也这样）；
+// 其余类别只在自由瞄准开着时（free_on）。两种情况都还要过技能表（skill_<号>=0 可以单独关掉）
+// Whether this cast picks no monster: movement skills by default always (move_always=1, Victor 2026-11-04: Leap with the left stick held jumps the full range, without it jumps in place, and the other movement skills should do the same);
+// other classes only while free aim is on (free_on). Both cases still go through the skill list (skill_<id>=0 turns a single one off)
+static inline int dm_aim_ignore_target(int cls, int skill, int free_on, int (*get)(const char *key, int def)) {
+    if (!free_on && !(cls == DM_AIM_MOVE && get("move_always", 1))) return 0;
+    return dm_aim_free_listed(cls, skill, get);
+}
 // 摇杆推的幅度（0–1）→ 距离比例：死区 0.25 以内 = 0，0.95 以上 = 1，中间线性 | Stick push amount (0-1) -> distance fraction: within the 0.25 dead zone = 0, above 0.95 = 1, linear between
 static inline float dm_aim_frac(float mag) { float f = (mag - 0.25f) / 0.70f; return f < 0 ? 0 : f > 1 ? 1 : f; }

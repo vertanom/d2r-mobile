@@ -44,19 +44,19 @@ static int read_live(uint64_t a,void *out,size_t n) {
 // Every cast (press edge and hold recast) selects again: if the locked one died / walked out of the cone, the next cast switches to another one with the smallest angle in the cone, and casts at the position if none is left in the cone.
 #define AIM_CONE_DEG 30.0f
 #define AIM_CONE_MAX_DIST 22.0f
-static uint64_t g_cone_rec, g_cone_slot_mgr; static uint8_t g_cone_rec_was; static _Atomic int g_cone_set;
+static uint64_t g_cone_rec, g_cone_slot_mgr; static uint8_t g_cone_rec_was; static _Atomic int g_cone_set, g_cone_keep;   // keep = 位移类缺省不选怪设的，右摇杆归零时也不恢复 | keep = set by the movement default, not restored when the right stick returns to zero
 static float cone_cos(void) { static float c = -2; if (c < -1.5f) { const char *e = getenv("DM_AIM_CONE"); float d = e ? (float)atof(e) : AIM_CONE_DEG; c = d > 0 ? cosf(d * 3.14159265f / 180.0f) : 2.0f; } return c; }   // 2 = 关掉 | 2 = off
 static int cone_unit_xy(uint64_t u, float *x, float *y) { uint64_t pp = 0; uint16_t a = 0, c = 0; if (!read_live(u + 0x38, &pp, 8) || !pp || !read_live(pp + 2, &a, 2) || !read_live(pp + 6, &c, 2)) return 0; *x = (float)a + 0.5f; *y = (float)c + 0.5f; return 1; }   // 会走动的单位（玩家 / 怪）：路径结构 +2 / +6 是整数格（+0 / +4 是 16.16 定点的低半） | units that walk (players / monsters): path struct +2 / +6 are integer cells (+0 / +4 are the low half of the 16.16 fixed point)
 static void cone_restore(void) {
     if (g_cone_rec) { *(uint8_t *)(g_cone_rec + 0x18) = g_cone_rec_was; g_cone_rec = 0; }
     if (g_cone_slot_mgr) { *(uint64_t *)(g_cone_slot_mgr + 0xd10) = 0; g_cone_slot_mgr = 0; }
-    atomic_store(&g_cone_set, 0);
+    atomic_store(&g_cone_set, 0); atomic_store(&g_cone_keep, 0);
 }
 // 取手柄处每帧调（hle_hid.c）：右摇杆归零了就把动过的两处恢复（拖完之后没有再施放时，不能把指定目标留在槽里）
 // Called every frame at the controller read (hle_hid.c): once the right stick returns to zero, restore the two places that were changed (when there is no further cast after the drag ends, the designated target must not be left in the slot)
 void dm_aim_cone_pump(void) {
     if (!atomic_load(&g_cone_set)) return; int32_t rx = 0, ry = 0; dm_input_sampled_right(&rx, &ry);
-    if (!(getenv("DM_TEST_AIM") || getenv("DM_TEST_AIM_AT")) && !rx && !ry && !dm_aim_free_on()) { cone_restore(); return; }   // 自由瞄准开着时不恢复：右摇杆本来就不动 | not restored while free aim is on: the right stick is not moved then anyway
+    if (!(getenv("DM_TEST_AIM") || getenv("DM_TEST_AIM_AT")) && !rx && !ry && !dm_aim_free_on() && !atomic_load(&g_cone_keep)) { cone_restore(); return; }   // 自由瞄准开着时不恢复：右摇杆本来就不动 | not restored while free aim is on: the right stick is not moved then anyway
 }
 // ---- 自由瞄准（PC 按住 Shift 放技能 = 不选怪、朝方向放）：手柄键位的宿主动作 FREEAIM（按住）/ FREEAIMTOGGLE（开关），dm_gamepad.m 调 dm_aim_free_set ----
 // 生效时表里的技能（aim_free.txt，缺省 = 位移类，见 dm_aim.h）：不走锥内选怪，指定目标槽清零、alwaysIgnoreTarget 置 1（同上面「锥内没怪」那条已实测的路），方向取左摇杆。
@@ -142,8 +142,9 @@ void svc_private_skill_aim(uint64_t *regs) {
     { const char *t=getenv("DM_TEST_AIM");if(t)sscanf(t,"%d,%d",&rx,&ry); }   // 测试：顶替右摇杆采样（宿主按键脚本没有右摇杆伪键） | test: stands in for right stick sampling (the host key script has no right stick pseudo-keys)
     { float p0[2]={position[0],position[1]}; cone_test_dir(m,regs[1],p0,&rx,&ry); }
     float vec[2],original[2]={direction[0],direction[1]};int active=dm_private_aim_vector(rx,ry,vec),fr=dm_aim_free_on();
-    if(!active && !fr && atomic_load(&g_cone_set))cone_restore();   // 不拖、没开自由瞄准 = 原生 | no drag and no free aim = native
-    if(active || fr) {
+    // 每次施放都进来取类别：位移类缺省不选怪，不拖也要改（dm_aim_ignore_target）；其余类别不拖、没开自由瞄准 = 原生
+    // Every cast comes in to get the class: movement skills pick no monster by default, even without a drag (dm_aim_ignore_target); other classes without a drag and without free aim = native
+    {
         // 目标点 = 位置 + 方向 × 射程（游戏在 0x2fac70 里乘，射程取自 0x2b5c70），再取整到格。近战类射程只有 2–4 格，取整后方向只剩 8 个档（斜向吸到格子边）；
         // 落点距离无所谓的技能把方向放大，让目标点落到 24 格外（目标格相对角色真实位置的取整误差 ≤1.7°；按整数格差量、不计角色站位小数时 ≤3°——16 格时真机按格差量到正上 / 正下各偏 5°）。实测（圣骑普通攻击，目标点 12 格外按住 4 发）：人原地挥砍、不走动。射程更大的技能落点有意义，不动
         // Target point = position + direction × range (the game multiplies in 0x2fac70, range comes from 0x2b5c70), then rounded to a cell. Melee-type range is only 2–4 cells, after rounding only 8 direction steps remain (diagonals snap to cell edges);
@@ -172,12 +173,13 @@ void svc_private_skill_aim(uint64_t *regs) {
                read_live(base+(uint64_t)sk*0x2ec+0x4e,&fn,2)) cls=dm_aim_class(fn,dist,scaled);
         }
         int far=cls==DM_AIM_SHOT;
-        if(fr && rec && dm_aim_free_listed(cls,sk,free_get)) {   // 自由瞄准：左摇杆方向（松着 = 原方向），不选怪 | free aim: the left stick's direction (released = the original direction), no monster picked
+        if(rec && dm_aim_ignore_target(cls,sk,fr,free_get)) {   // 自由瞄准：左摇杆方向（松着 = 原方向），不选怪 | free aim: the left stick's direction (released = the original direction), no monster picked
             int32_t lx=0,ly=0;dm_input_sampled_left(&lx,&ly);float lv[2],f=test_frac();int lon=dm_private_aim_vector(lx,ly,lv);
             if(lon){direction[0]=lv[0]*f;direction[1]=lv[1]*f;} else {direction[0]*=f;direction[1]*=f;}
-            cone_restore(); *(uint64_t *)(mg+0xd10)=0; g_cone_slot_mgr=mg; g_cone_rec=rec; g_cone_rec_was=*(uint8_t *)(rec+0x18); *(uint8_t *)(rec+0x18)=1; atomic_store(&g_cone_set,1);
+            cone_restore(); *(uint64_t *)(mg+0xd10)=0; g_cone_slot_mgr=mg; g_cone_rec=rec; g_cone_rec_was=*(uint8_t *)(rec+0x18); *(uint8_t *)(rec+0x18)=1; atomic_store(&g_cone_set,1); atomic_store(&g_cone_keep,!fr);
             { static int lg; if(lg++<40)LOG("自由瞄准：技能号 %d 类别 %d 施放函数 %u → 不选怪，方向 %s（%.2f, %.2f）比例 %.2f",sk,cls,fn,lon?"左摇杆":"原方向",direction[0],direction[1],f); }
-        } else if(active) {
+        } else if(!active) { if(atomic_load(&g_cone_set))cone_restore(); }   // 不拖 = 原生 | no drag = native
+        else {
             float rg=((Range)(m->base+0x2b5c70))(mg,regs[1],0),k=(far && rg>0.0f && isfinite(rg))?24.0f/rg:(cls==DM_AIM_MOVE||cls==DM_AIM_ZONE)?test_frac():1.0f;
             { static int lg; if(getenv("DM_SKILL_AIM_LOG") && lg++<12)LOG("瞄准适配：技能号 %d 手柄落点距离 %.2f 施放函数 %u 类别 %d 射程 %.2f 放大 %.1f",sk,dist,fn,cls,rg,k); }
             direction[0]=vec[0]*k;direction[1]=vec[1]*k;
