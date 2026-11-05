@@ -65,9 +65,9 @@ static void bind_reload(uint64_t held) {
 }
 static void apply(void);
 // 地图平移按住一直走：每 30 毫秒挪 12 格（Victor 2026-11-04 再快一倍），松开（acts 里没有平移了）就停。方向实测（2026-11-03）：卷动量为正时地图往右 / 往下走，所以「地图往左」给负值 | Map panning keeps moving while held: 12 cells every 30 ms (Victor 2026-11-04: twice as fast again), stops once released (no panning left in acts). Direction measured (2026-11-03): a positive scroll moves the map right / down, so "map left" is negative
-static int g_pan_running;
+static int g_pan_running; static uint64_t g_key_acts, g_key_fired;   // 键盘按着的宿主动作 / 键盘新按下、还没执行的宿主动作（dm_gamepad_key） | host actions held on the keyboard / ones newly pressed on the keyboard and not yet run (dm_gamepad_key)
 static void pan_tick(void) {
-    uint64_t a = g_bind_st.acts; int dx = !!(a & DM_PADACT_MAPRIGHT) - !!(a & DM_PADACT_MAPLEFT), dy = !!(a & DM_PADACT_MAPDOWN) - !!(a & DM_PADACT_MAPUP);
+    uint64_t a = g_bind_st.acts | g_key_acts; int dx = !!(a & DM_PADACT_MAPRIGHT) - !!(a & DM_PADACT_MAPLEFT), dy = !!(a & DM_PADACT_MAPDOWN) - !!(a & DM_PADACT_MAPUP);
     if (!dx && !dy) { g_pan_running = 0; return; }
     void dm_ui_map_pan(int dx, int dy); dm_ui_map_pan(dx * 12, dy * 12);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ pan_tick(); });
@@ -81,6 +81,24 @@ void dm_gamepad_remap_reload(void) { dispatch_async(dispatch_get_main_queue(), ^
 // Combo = hold the modifiers then press the trigger: decided when everything is released, the last button pressed is the trigger and those held before it are the modifiers; a single press = no modifiers. While waiting no button reaches the game; buttons already held when waiting starts do not count. Main thread only.
 static void (^g_capture)(uint64_t mods, int bit); static uint64_t g_raw_b, g_cap_acc; static int g_cap_last;
 void dm_gamepad_capture(void (^cb)(uint64_t mods, int bit)) { g_capture = cb; g_cap_acc = 0; g_cap_last = -1; }
+// 局内没开面板才按表；菜单 / 面板里原样（储藏箱 / 编年史用 L / R / ZL / ZR 翻页签）。Mac 的 dm_front_navigation 恒为 1（app_mac.m），用触摸层自己的判断
+// The table applies only in a run with no panel open; in menus / panels everything is unchanged (the stash / Chronicle switch tabs with L / R / ZL / ZR). On the Mac dm_front_navigation is always 1 (app_mac.m), so the touch layer's own check is used
+static int bind_menu(void) { int dm_touch_host_world_active(void), dm_uiscreen_panel(void); return !dm_touch_host_world_active() || dm_uiscreen_panel(); }
+// Mac 键盘（front_mac.m on_key 调，主线程）：键盘键 idx（dm_padbind_keys）按下 / 松开，按表的键盘那栏换成输出。按下那一刻定下发什么（同手柄的 latch），
+// 菜单里按缺省。宿主动作交给 apply 跟手柄的一起执行（按住型的 FREEAIM、地图平移也认键盘）。返回此刻键盘按着的全部 Switch 键
+// Mac keyboard (called by front_mac.m on_key, main thread): keyboard key idx (dm_padbind_keys) down / up, turned into its output by the table's keyboard column. What it sends is fixed the moment it goes down (like the controller's latch),
+// and menus use the default. Host actions are handed to apply and run together with the controller's (the held FREEAIM and map panning also take the keyboard). Returns every Switch button the keyboard holds right now
+static uint64_t g_key_latch[DM_PADBIND_NKEY]; static uint8_t g_key_down[DM_PADBIND_NKEY];
+uint64_t dm_gamepad_key(int idx, int down) {
+    bind_reload(g_raw_b);
+    if (idx >= 0 && idx < DM_PADBIND_NKEY) {
+        if (down && !g_key_down[idx]) { uint64_t o = bind_menu() ? dm_padbind_key_def(idx) : g_bind.kout[idx]; g_key_latch[idx] = o; g_key_down[idx] = 1; g_key_fired |= o & DM_PADACT_ALL;
+            if (o & DM_PADACT_ALL) LOG("键盘键位：KEY_%s → 宿主动作 0x%llx", dm_padbind_keys[idx].name, (unsigned long long)(o & DM_PADACT_ALL)); }
+        else if (!down) g_key_down[idx] = 0; }
+    uint64_t b = 0, a = 0; for (int i = 0; i < DM_PADBIND_NKEY; i++) if (g_key_down[i]) { b |= g_key_latch[i] & ((1ull << DM_PADBIND_N) - 1); a |= g_key_latch[i] & DM_PADACT_ALL; }
+    uint64_t was = g_key_acts; g_key_acts = a; if (g_key_fired || a != was) apply();
+    return b;
+}
 #endif
 // 把各手柄合起来、定模式、交给宿主。任何一份变了都重算一遍
 // Merge all controllers, decide the mode and hand the result to the host. Recompute whenever any one of them changes
@@ -99,7 +117,7 @@ static void apply(void) {
     // Mac 的 dm_front_navigation 恒为 1（app_mac.m），局内 / 面板用触摸层自己的判断 dm_touch_host_world_active（局内、没开面板、没暂停）
     // Remapping happens before the free town portal: that block looks at the ZL / ZR the game will receive. In menus newly pressed buttons stay unchanged (tab switching).
     // On the Mac dm_front_navigation is always 1 (app_mac.m), so in-run / panel state comes from the touch layer's own dm_touch_host_world_active (in a run, no panel, not paused)
-    { int dm_touch_host_world_active(void), dm_uiscreen_panel(void), wake = -1, menu = !dm_touch_host_world_active() || dm_uiscreen_panel(); static int last_menu = -1; bind_reload(b);
+    { int wake = -1, menu = bind_menu(); static int last_menu = -1; bind_reload(b);
       // 等着设定：每一下都把按着的键记为「松开前不算」，所以等的时候都不进游戏；全松开时定下按过的组合 | Waiting for Set: every call marks the held buttons "ignored until released", so nothing reaches the game while waiting; the combo is decided once everything is released
       { uint64_t raw = b & ((1ull << DM_PADBIND_N) - 1), fresh = raw & ~g_raw_b; g_raw_b = raw;
         if (g_capture) { dm_padbind_reset(&g_bind_st, raw);
@@ -109,7 +127,8 @@ static void apply(void) {
       if (menu != last_menu && !dm_padbind_is_identity(&g_bind)) { static int n; if (n++ < 20) LOG("手柄键位：%s", menu ? "菜单 / 面板 → 新按的键原样" : "局内 → 按表重映射"); } last_menu = menu;
       b = dm_padbind_step(&g_bind, &g_bind_st, b, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000, menu, g_bind.stage_ms, &wake);
       // 表里的宿主动作：按下那一刻执行一次，不发给游戏 | Host actions from the table: run once at the moment they go down, never sent to the game
-      uint64_t f_free = g_bind_st.fired;
+      g_bind_st.fired |= g_key_fired; g_key_fired = 0;   // 键盘新按下的宿主动作一起执行 | host actions newly pressed on the keyboard run together
+      uint64_t f_free = g_bind_st.fired, acts = g_bind_st.acts | g_key_acts;
       if (g_bind_st.fired) { uint64_t f = g_bind_st.fired; g_bind_st.fired = 0; void dm_ui_map_full(int on), dm_tp_request(void); int dm_ui_map_shown_full(void);
         if (f & DM_PADACT_MAPSIZE) { int on = !dm_ui_map_shown_full(); dm_ui_map_full(on); LOG("手柄键位：动作 MAPSIZE → %s", on ? "全屏地图" : "小地图"); }
         if (f & DM_PADACT_TOWNPORTAL) { dm_tp_request(); LOG("手柄键位：动作 TOWNPORTAL → 免费回城"); }
@@ -118,9 +137,10 @@ static void apply(void) {
           if (f & DM_PADACT_MAPZOOMIN) dm_ui_map_zoom(1);
           if (f & DM_PADACT_MAPZOOMOUT) dm_ui_map_zoom(-1);
           if (f & DM_PADACT_MAPCENTER) { void dm_ui_map_pan_reset(void); dm_ui_map_pan_reset(); } } }
-      { static int last_hold; int hold = (g_bind_st.acts & DM_PADACT_FREEAIM) != 0, tog = (f_free & DM_PADACT_FREEAIMTOGGLE) != 0;   // 自由瞄准：按住型跟 acts，切换型按下一次切一次（hle_private_aim.c） | free aim: the hold kind follows acts, the toggle kind flips once per press (hle_private_aim.c)
-        if (hold != last_hold || tog) { void dm_aim_free_set(int, int); dm_aim_free_set(hold, tog); if (hold != last_hold) LOG("手柄键位：动作 FREEAIM → %s", hold ? "按住" : "松开"); last_hold = hold; } }
-      if (!g_pan_running && (g_bind_st.acts & (DM_PADACT_MAPLEFT | DM_PADACT_MAPRIGHT | DM_PADACT_MAPUP | DM_PADACT_MAPDOWN))) { g_pan_running = 1; pan_tick(); }
+      { static int last_hold; int hold = (acts & DM_PADACT_FREEAIM) != 0, tog = (f_free & DM_PADACT_FREEAIMTOGGLE) != 0;   // 自由瞄准：按住型跟 acts，切换型按下一次切一次（hle_private_aim.c） | free aim: the hold kind follows acts, the toggle kind flips once per press (hle_private_aim.c)
+        if (hold != last_hold || tog) { void dm_aim_free_set(int, int); dm_aim_free_set(hold, tog); if (hold != last_hold) LOG("手柄键位：动作 FREEAIM → %s", hold ? "按住" : "松开"); last_hold = hold; }
+        if (f_free & DM_PADACT_RELEASECAST) { void dm_aim_release_toggle(void); dm_aim_release_toggle(); } }
+      if (!g_pan_running && (acts & (DM_PADACT_MAPLEFT | DM_PADACT_MAPRIGHT | DM_PADACT_MAPUP | DM_PADACT_MAPDOWN))) { g_pan_running = 1; pan_tick(); }
       if (wake >= 0) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wake + 1) * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ apply(); }); }
 #endif   // 触屏模式不交摇杆；手柄模式下没推出来的给 0 | Sticks are not delivered in touch mode; in controller mode a stick that is not pushed out gives 0
     // ZR：原版六个技能格之一。这一格空着（没绑技能）时按它 = 免费回城（手柄玩家也免费回城，与触屏回城钮一致）；绑了技能就整颗交还原版（不再整颗占用）。
@@ -151,6 +171,10 @@ static void drop(const void *who) {   // 这个手柄没了：只拿掉它那一
 void dm_gamepad_touched(void) { if (g_pad_mode) { g_need_center = 1; set_mode(0); apply(); } }   // 前端：碰了屏幕。摇杆此刻偏着的话要先回中才重新接管 | Front end: the screen was touched. If a stick is deflected right now it must return to center before taking over again
 void dm_gamepad_reset(void) {   // 前端：失活 / 进后台 / 来电 | Front end: resign active / enter background / incoming call
     int any = 0; for (int i = 0; i < NSLOT; i++) if (g_s[i].who) { any |= g_s[i].b != 0 || g_s[i].ax[0] || g_s[i].ax[1] || g_s[i].ax[2] || g_s[i].ax[3]; g_s[i].b = 0; memset(g_s[i].ax, 0, sizeof g_s[i].ax); }
+#if TARGET_OS_OSX
+    for (int i = 0; i < DM_PADBIND_NKEY; i++) any |= g_key_down[i];
+    memset(g_key_down, 0, sizeof g_key_down); g_key_acts = 0; g_key_fired = 0;   // 键盘按着的也放掉（front_mac.m 失焦时调） | release what the keyboard holds too (front_mac.m calls this on focus loss)
+#endif
     if (any) { LOG("手柄：失活，手柄的键和摇杆清零"); apply(); }
 }
 // 测试（触点脚本 pad / pad2 / padoff / padoff2 步）：没有实体手柄时走同一条路，只少了 GameController 回调那一层。n = 1 或 2：两个虚拟手柄

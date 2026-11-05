@@ -7,6 +7,8 @@
 //   组合（MINUS+UP=MAPSIZE）：按着修饰键（− ）再按触发键（↑）发组合的输出。当修饰键用的键按下后先等 DM_PADBIND_CHORD_MS：这段时间里按了触发键 = 组合，修饰键自己什么都不发；
 //   过了还没组合 = 照常按住，开始发它自己的输出（按住连放技能照旧，只晚这几十毫秒）；按住途中再按触发键，组合照样成立，修饰键自己的输出当场放掉。
 //   等的时间里就松开 = 单按，补发它自己的输出 DM_PADBIND_TAP_MS 毫秒。修饰键最多的那个组合优先。
+//   键盘（Mac App）：同一张表另有一栏「键盘键 → 输出」（KEY_G=RS），输出跟手柄一样是 Switch 键或宿主动作；没写的键按缺省（dm_padbind_key_def，即帮助页的键位对照）。
+//   键盘一颗键一个输出，没有组合和分段；WASD（移动）、回车、Esc 不进表，前端照旧。
 //   输出除了 Switch 键还可以是宿主动作（DM_PADACT_*，高位）：按下那一刻记进 st->fired，前端取走执行，不发给游戏；st->acts = 此刻按着的宿主动作（地图平移按住一直走）。
 // Physical controller remapping: each physical button -> a set of Switch buttons (none, one, or a combination such as "ZL + a skill-slot button"). Pure functions, used by the front end dm_gamepad.m, checked by the host unit test tests/t_padbind.c.
 //   No configuration = unchanged (each button sends itself), byte for byte the same as without this layer.
@@ -17,6 +19,8 @@
 //   Combos (MINUS+UP=MAPSIZE): holding the modifier (−) and pressing the trigger (↑) sends the combo's output. A button used as a modifier first waits DM_PADBIND_CHORD_MS: a trigger pressed within it = the combo, and the modifier sends nothing itself;
 //   no combo by then = an ordinary hold, it starts sending its own output (holding to keep casting still works, only these few tens of ms later); pressing a trigger later while holding still forms the combo and drops the modifier's own output at once.
 //   Released within the wait = a tap, its own output is sent for DM_PADBIND_TAP_MS milliseconds. The combo with the most modifiers wins.
+//   Keyboard (Mac App): the same table has a second column "keyboard key -> output" (KEY_G=RS), outputs are Switch buttons or host actions like the controller's; keys not written use the default (dm_padbind_key_def, the Help page's key reference).
+//   One output per keyboard key, no combos and no staging; WASD (movement), Return and Esc are not in the table and the front end keeps handling them.
 //   Besides Switch buttons an output can hold host actions (DM_PADACT_*, high bits): they are recorded in st->fired the moment they go down, the front end takes and runs them, and they are not sent to the game; st->acts = host actions held right now (map panning keeps moving while held).
 #pragma once
 #include <stdint.h>
@@ -28,7 +32,7 @@
 
 enum { DM_PADBIND_N = 16, DM_PADBIND_COMBOS = 32, DM_PADBIND_TAP_MS = 80, DM_PADBIND_CHORD_MS = 120 };   // 实体键 = 原版键位位 0–15（A B X Y LS RS L R ZL ZR + − ← ↑ → ↓）；组合最多 32 条；修饰键单按补发的毫秒；修饰键等组合的毫秒 | Physical buttons = original button bits 0-15; at most 32 combos; milliseconds a lone modifier tap is sent; milliseconds a modifier waits for a combo
 // 宿主动作：输出的位 48 起（实体手柄只有 0–15，前端自用位不进表的输出） | Host actions: output bits from 48 (the physical controller only has 0-15; the front end's own bits never appear in table outputs)
-enum { DM_PADBIND_ACT0 = 48, DM_PADBIND_NACT = 12 };
+enum { DM_PADBIND_ACT0 = 48, DM_PADBIND_NACT = 13 };
 #define DM_PADACT_MAPSIZE (1ull << 48)      // 地图：全屏 ↔ 小地图（dm_ui_map_full） | map: fullscreen <-> minimap (dm_ui_map_full)
 #define DM_PADACT_TOWNPORTAL (1ull << 49)   // 免费回城（dm_tp_request） | free town portal (dm_tp_request)
 #define DM_PADACT_MAPPOS (1ull << 50)       // 小地图放左 ↔ 放右（dm_ui_map_pos_toggle） | minimap left <-> right (dm_ui_map_pos_toggle)
@@ -41,18 +45,41 @@ enum { DM_PADBIND_ACT0 = 48, DM_PADBIND_NACT = 12 };
 #define DM_PADACT_MAPCENTER (1ull << 57)    // 平移归零（dm_ui_map_pan_reset） | reset panning (dm_ui_map_pan_reset)
 #define DM_PADACT_FREEAIM (1ull << 58)      // 按住 = 自由瞄准（PC 的 Shift：表里的技能不选怪，朝左摇杆方向放，hle_private_aim.c） | held = free aim (the PC's Shift: listed skills pick no monster and go the left stick's way, hle_private_aim.c)
 #define DM_PADACT_FREEAIMTOGGLE (1ull << 59)   // 自由瞄准开 ↔ 关 | free aim on <-> off
+#define DM_PADACT_RELEASECAST (1ull << 60)   // 松开才放开 ↔ 关（位移 / 落点类按住瞄、松开放，hle_private_aim.c） | cast on release on <-> off (movement / ground zone: hold to aim, release to cast, hle_private_aim.c)
 #define DM_PADACT_ALL (((1ull << DM_PADBIND_NACT) - 1) << DM_PADBIND_ACT0)
 typedef struct { uint64_t mods; int btn; uint64_t out; } dm_padbind_combo;   // 按着 mods 的全部再按 btn → out | holding all of mods and pressing btn -> out
-typedef struct { uint64_t out[DM_PADBIND_N]; int stage_ms; int ncombo; dm_padbind_combo combo[DM_PADBIND_COMBOS]; } dm_padbind_table;   // stage_ms：分段毫秒（0 = 不分段） | stage_ms: staging milliseconds (0 = no staging)
+// 键盘键：名字（KEY_ 之后那段）与 Mac 虚拟键码。只许往后加（文件里按名字存，不按序号） | Keyboard keys: name (the part after KEY_) and Mac virtual key code. Append only (files store names, not indices)
+typedef struct { const char *name; unsigned short code; } dm_padbind_key;
+static const dm_padbind_key dm_padbind_keys[] = {
+    {"B", 11}, {"C", 8}, {"E", 14}, {"F", 3}, {"G", 5}, {"H", 4}, {"I", 34}, {"J", 38}, {"K", 40}, {"L", 37}, {"M", 46}, {"N", 45}, {"O", 31}, {"P", 35}, {"Q", 12}, {"R", 15}, {"T", 17}, {"U", 32}, {"V", 9}, {"X", 7}, {"Y", 16}, {"Z", 6},
+    {"1", 18}, {"2", 19}, {"3", 20}, {"4", 21}, {"5", 23}, {"6", 22}, {"7", 26}, {"8", 28}, {"9", 25}, {"0", 29},
+    {"F1", 122}, {"F2", 120}, {"F3", 99}, {"F4", 118}, {"F5", 96}, {"F6", 97}, {"F7", 98}, {"F8", 100}, {"F9", 101}, {"F10", 109}, {"F11", 103}, {"F12", 111},
+    {"SPACE", 49}, {"TAB", 48}, {"EQUAL", 24}, {"MINUS", 27}, {"LBRACKET", 33}, {"RBRACKET", 30}, {"SEMICOLON", 41}, {"QUOTE", 39}, {"COMMA", 43}, {"PERIOD", 47}, {"SLASH", 44}, {"GRAVE", 50}, {"BACKSLASH", 42},
+    {"LEFT", 123}, {"UP", 126}, {"RIGHT", 124}, {"DOWN", 125}, {"PADPLUS", 69},
+};
+enum { DM_PADBIND_NKEY = sizeof dm_padbind_keys / sizeof *dm_padbind_keys };
+static inline int dm_padbind_key_index(unsigned short code) { for (int i = 0; i < DM_PADBIND_NKEY; i++) if (dm_padbind_keys[i].code == code) return i; return -1; }
+// 键盘缺省（与帮助页「键盘与手柄按键对照」一致）：J K U I → A B X Y，F G → 按摇杆，Q E Z C → L R ZL ZR，Tab → −，= 与小键盘 + → ＋，空格 → A，方向键 → 十字键
+// Keyboard defaults (as on the Help page "Keyboard and Controller Buttons"): J K U I -> A B X Y, F G -> stick presses, Q E Z C -> L R ZL ZR, Tab -> −, = and keypad + -> +, Space -> A, arrow keys -> D-pad
+static inline uint64_t dm_padbind_key_def(int i) {
+    switch (dm_padbind_keys[i].code) {
+        case 38: case 49: return DM_BTN_A; case 40: return DM_BTN_B; case 32: return DM_BTN_X; case 34: return DM_BTN_Y;
+        case 3: return DM_BTN_LS; case 5: return DM_BTN_RS; case 12: return DM_BTN_L; case 14: return DM_BTN_R; case 6: return DM_BTN_ZL; case 8: return DM_BTN_ZR;
+        case 48: return DM_BTN_MINUS; case 24: case 69: return DM_BTN_PLUS;
+        case 123: return DM_BTN_LEFT; case 126: return DM_BTN_UP; case 124: return DM_BTN_RIGHT; case 125: return DM_BTN_DOWN;
+    }
+    return 0;
+}
+typedef struct { uint64_t out[DM_PADBIND_N]; int stage_ms; int ncombo; dm_padbind_combo combo[DM_PADBIND_COMBOS]; uint64_t kout[DM_PADBIND_NKEY]; } dm_padbind_table;   // kout：键盘各键的输出 | kout: each keyboard key's output   // stage_ms：分段毫秒（0 = 不分段） | stage_ms: staging milliseconds (0 = no staging)
 // pend = 当修饰键按着、还在等组合；used = 按着期间组过组合（松开前不再发）；tap = 修饰键单按、正在补发；fired = 这一步新按下的宿主动作（前端取走后清零）；acts = 此刻按着的宿主动作
 // pend = held as a modifier, still waiting for a combo; used = formed a combo while held (sends nothing until released); tap = lone modifier tap being sent; fired = host actions that went down in this step (the front end clears it after taking them); acts = host actions held right now
 typedef struct { uint64_t held, ignore, latch[DM_PADBIND_N], t_down[DM_PADBIND_N], t_up[DM_PADBIND_N], tail, pend, used, tap, fired, acts; } dm_padbind_state;
 
 static const char *const dm_padbind_names[DM_PADBIND_N] = { "A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN" };
-static const char *const dm_padbind_act_names[DM_PADBIND_NACT] = { "MAPSIZE", "TOWNPORTAL", "MAPPOS", "MAPZOOMIN", "MAPZOOMOUT", "MAPLEFT", "MAPRIGHT", "MAPUP", "MAPDOWN", "MAPCENTER", "FREEAIM", "FREEAIMTOGGLE" };
+static const char *const dm_padbind_act_names[DM_PADBIND_NACT] = { "MAPSIZE", "TOWNPORTAL", "MAPPOS", "MAPZOOMIN", "MAPZOOMOUT", "MAPLEFT", "MAPRIGHT", "MAPUP", "MAPDOWN", "MAPCENTER", "FREEAIM", "FREEAIMTOGGLE", "RELEASECAST" };
 
-static inline void dm_padbind_identity(dm_padbind_table *t) { memset(t, 0, sizeof *t); for (int i = 0; i < DM_PADBIND_N; i++) t->out[i] = 1ull << i; }
-static inline int dm_padbind_is_identity(const dm_padbind_table *t) { for (int i = 0; i < DM_PADBIND_N; i++) if (t->out[i] != 1ull << i) return 0; return !t->ncombo; }
+static inline void dm_padbind_identity(dm_padbind_table *t) { memset(t, 0, sizeof *t); for (int i = 0; i < DM_PADBIND_N; i++) t->out[i] = 1ull << i; for (int i = 0; i < DM_PADBIND_NKEY; i++) t->kout[i] = dm_padbind_key_def(i); }
+static inline int dm_padbind_is_identity(const dm_padbind_table *t) { for (int i = 0; i < DM_PADBIND_N; i++) if (t->out[i] != 1ull << i) return 0; return !t->ncombo; }   // 只看手柄（键盘那栏不影响手柄这层） | controller only (the keyboard column does not affect this layer)
 // 设一条组合：同一组 mods + btn 的旧条目换掉；out 为 ~0 = 删掉这条。满了返回 0 | Set a combo: an old entry with the same mods + btn is replaced; out ~0 = delete it. Returns 0 when full
 static inline int dm_padbind_set_combo(dm_padbind_table *t, uint64_t mods, int btn, uint64_t out) {
     for (int k = 0; k < t->ncombo; k++) if (t->combo[k].mods == mods && t->combo[k].btn == btn) {
@@ -91,8 +118,13 @@ static inline int dm_padbind_parse(const char *s, dm_padbind_table *t) {
                 if (end == eq + 1 || end != e || v < 0 || v > 500) return 0;
                 r.stage_ms = (int)v; s = *e ? e + 1 : e; continue;
             }
+            int key = -1;
+            if (ae - a > 4 && !strncasecmp(a, "KEY_", 4)) {   // 键盘键：KEY_<名> | keyboard key: KEY_<name>
+                for (int i = 0; i < DM_PADBIND_NKEY; i++) if (strlen(dm_padbind_keys[i].name) == (size_t)(ae - a - 4) && !strncasecmp(a + 4, dm_padbind_keys[i].name, (size_t)(ae - a - 4))) key = i;
+                if (key < 0) return 0;
+            }
             uint64_t mods = 0; int src = -1;
-            for (const char *p = a;;) {   // 左边：一颗键，或「修饰键+…+触发键」 | left side: one button, or "modifier+...+trigger"
+            if (key < 0) for (const char *p = a;;) {   // 左边：一颗键，或「修饰键+…+触发键」 | left side: one button, or "modifier+...+trigger"
                 while (p < ae && (*p == ' ' || *p == '\t')) p++;
                 const char *q = p; while (q < ae && *q != '+') q++;
                 const char *qe = q; while (qe > p && (qe[-1] == ' ' || qe[-1] == '\t')) qe--;
@@ -100,7 +132,7 @@ static inline int dm_padbind_parse(const char *s, dm_padbind_table *t) {
                 if (src >= 0) { if (mods & 1ull << src) return 0; mods |= 1ull << src; }
                 src = b; if (q >= ae) break; p = q + 1;
             }
-            if (mods & 1ull << src) return 0;
+            if (key < 0 && (mods & 1ull << src)) return 0;
             uint64_t m = 0; const char *p = eq + 1;
             for (;;) {
                 while (p < e && (*p == ' ' || *p == '\t')) p++;
@@ -110,15 +142,15 @@ static inline int dm_padbind_parse(const char *s, dm_padbind_table *t) {
                 else { uint64_t b = dm_padbind_out_token(p, (size_t)(qe - p)); if (!b) return 0; m |= b; }
                 if (q >= e) break; p = q + 1;
             }
-            if (!mods) r.out[src] = m; else if (!dm_padbind_set_combo(&r, mods, src, m)) return 0;
+            if (key >= 0) r.kout[key] = m; else if (!mods) r.out[src] = m; else if (!dm_padbind_set_combo(&r, mods, src, m)) return 0;
         }
         s = *e ? e + 1 : e;
     }
     *t = r; return 1;
 }
 
-// 写成 dm_padbind_parse 认的文本：STAGE 一行，之后只写改过的键（一行一条），再写组合。返回写出的长度；放不下返回 0。
-// Formats the text dm_padbind_parse reads: one STAGE line, then only the changed buttons (one per line), then the combos. Returns the length written; 0 if it does not fit.
+// 写成 dm_padbind_parse 认的文本：STAGE 一行，之后只写改过的键（一行一条），再写组合，最后写改过的键盘键。返回写出的长度；放不下返回 0。
+// Formats the text dm_padbind_parse reads: one STAGE line, then only the changed buttons (one per line), then the combos, then the changed keyboard keys. Returns the length written; 0 if it does not fit.
 static inline int dm_padbind_put(char *buf, size_t cap, size_t *n, const char *s) { size_t l = strlen(s); if (*n + l + 1 > cap) return 0; memcpy(buf + *n, s, l + 1); *n += l; return 1; }
 static inline int dm_padbind_put_out(char *buf, size_t cap, size_t *n, uint64_t m) {   // 输出：键按键序，再宿主动作；空 = NONE | output: buttons in bit order, then host actions; empty = NONE
     if (!m) return dm_padbind_put(buf, cap, n, "NONE");
@@ -138,6 +170,10 @@ static inline size_t dm_padbind_format(const dm_padbind_table *t, char *buf, siz
         const dm_padbind_combo *c = &t->combo[k];
         for (int b = 0; b < DM_PADBIND_N; b++) if (c->mods & 1ull << b) { if (!dm_padbind_put(buf, cap, &n, dm_padbind_names[b]) || !dm_padbind_put(buf, cap, &n, "+")) return 0; }
         if (!dm_padbind_put(buf, cap, &n, dm_padbind_names[c->btn]) || !dm_padbind_put(buf, cap, &n, "=") || !dm_padbind_put_out(buf, cap, &n, c->out) || !dm_padbind_put(buf, cap, &n, "\n")) return 0;
+    }
+    for (int i = 0; i < DM_PADBIND_NKEY; i++) {
+        if (t->kout[i] == dm_padbind_key_def(i)) continue;
+        if (!dm_padbind_put(buf, cap, &n, "KEY_") || !dm_padbind_put(buf, cap, &n, dm_padbind_keys[i].name) || !dm_padbind_put(buf, cap, &n, "=") || !dm_padbind_put_out(buf, cap, &n, t->kout[i]) || !dm_padbind_put(buf, cap, &n, "\n")) return 0;
     }
     return n;
 }

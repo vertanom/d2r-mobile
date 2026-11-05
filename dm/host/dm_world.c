@@ -704,6 +704,13 @@ static void w_map_goal_step(void) {
         if (W > 0 && H > 0 && scene && w_project(b, scene, pl, f, 0)) { v.sx = f[0] / W; v.sy = f[1] / H; v.n = g_mg.n; for (int i = 0; i < g_mg.n; i++) { v.x[i] = g_mg.x[i]; v.y[i] = g_mg.y[i]; v.art[i] = g_mg.art[i]; } } }
     atomic_fetch_add(&g_mg_seq, 1); g_mg_pub = v; atomic_fetch_add(&g_mg_seq, 1);
 }
+// 玩家脚底在真实画面上的位置（像素，游戏自己的投影，同上面 v.sx / v.sy 的来源）与画面宽高：瞄准指示用（hle_private_aim.c）。游戏主线程；不在局内返回 0
+// The player's feet on the real picture (pixels, the game's own projection, the same source as v.sx / v.sy above) and the picture size: used by the aim indicator (hle_private_aim.c). Game main thread; returns 0 when not in a run
+int dm_world_player_screen(float *fx, float *fy, int *W, int *H) {
+    uint8_t *b = wb(); uint64_t pl = b ? w_player() : 0, scene = b ? *(uint64_t *)(b + 0x2e2a698) : 0; float f[2]; *W = *H = 0; dm_screen_real(W, H);
+    if (!pl || !scene || *W <= 0 || *H <= 0 || !w_project(b, scene, pl, f, 0)) return 0;
+    *fx = f[0]; *fy = f[1]; return 1;
+}
 int dm_map_goals(dm_map_goal_view *v) {
     for (int t = 0; t < 4; t++) { uint32_t a = atomic_load(&g_mg_seq); if (a & 1) continue; *v = g_mg_pub; if (atomic_load(&g_mg_seq) == a) return v->n; }
     v->n = 0; return 0;

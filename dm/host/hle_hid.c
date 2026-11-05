@@ -32,7 +32,8 @@ _Static_assert(sizeof(NpadState) == 0x28, "NpadState");
 
 static struct { _Atomic uint64_t buttons; _Atomic int32_t lx, ly, rx, ry; } g_in;
 static _Atomic int64_t g_sampling;
-static _Atomic uint64_t g_sampled_right,g_sampled_left;
+static _Atomic uint64_t g_sampled_right,g_sampled_left; static _Atomic int g_sampled_right_pad;
+int dm_input_sampled_right_pad(void) { return atomic_load_explicit(&g_sampled_right_pad,memory_order_acquire); }
 void dm_input_sampled_right(int32_t *rx,int32_t *ry) {
     uint64_t v=atomic_load_explicit(&g_sampled_right,memory_order_acquire);
     *rx=(int32_t)(uint32_t)v;*ry=(int32_t)(uint32_t)(v>>32);
@@ -406,8 +407,9 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     // 摇杆：触屏摇杆有值就用触屏的，否则用手柄的。手柄那边只在手柄模式、且摇杆确实推出来了才给非零值（dm_gamepad.m），放在一边有点漂移的手柄到不了这里
     // Sticks: if the touch stick has a value use it, otherwise use the controller's. The controller side only gives a non-zero value in controller mode and when the
     // stick has actually been pushed out (dm_gamepad.m), so a slightly drifting controller left lying aside never reaches here
+    int right_pad = 0;   // 右摇杆这一份来自实体手柄（不是触屏拖技能钮）：落点类按推的幅度给距离只认它（hle_private_aim.c） | this right stick sample came from the physical controller (not a touch drag on a skill button): only it gives ground zone skills a distance by push amount (hle_private_aim.c)
     { uint64_t ax = atomic_load(&g_pad_axes); int16_t plx = (int16_t)ax, ply = (int16_t)(ax >> 16), prx = (int16_t)(ax >> 32), pry = (int16_t)(ax >> 48);
-      if (!(s->lx || s->ly) && (plx || ply)) { s->lx = plx; s->ly = ply; } if (!(s->rx || s->ry) && (prx || pry)) { s->rx = prx; s->ry = pry; } }
+      if (!(s->lx || s->ly) && (plx || ply)) { s->lx = plx; s->ly = ply; } if (!(s->rx || s->ry) && (prx || pry)) { s->rx = prx; s->ry = pry; right_pad = 1; } }
     { int dm_padmode_input_gate(uint64_t *); if (dm_padmode_input_gate(&s->buttons)) s->lx = s->ly = s->rx = s->ry = 0; }   // 手柄 / 触屏切换事务进行中：键和摇杆都不交给游戏；触发切换时按着的键松开前也不交（dm_padmode.c） | Controller / touch switch transaction in progress: neither keys nor sticks are handed to the game; keys held when the switch was triggered are not handed over either until released (dm_padmode.c)
     if (dm_pad_hook) dm_pad_hook(guest_ns(), &s->buttons, &s->lx, &s->ly, &s->rx, &s->ry);
     // 镜头实验：摇杆 / 瞄准按透视画面方向换成原版方向（dm_cam.c；镜头关着原样不动）。放在 dm_pad_hook 之后：安卓的触屏摇杆是在那里才填进来的
@@ -420,7 +422,8 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     { void dm_cam_remap_stick(int32_t *, int32_t *, int32_t *, int32_t *); dm_cam_remap_stick(&s->lx, &s->ly, &s->rx, &s->ry); }
     { uint64_t dm_runeword_pad_filter(uint64_t); s->buttons = dm_runeword_pad_filter(s->buttons); }   // 手柄模式符文之语清单开着时十字键 / A / B / L / R 归清单（dm_runeword.c） | While the runeword list is open in controller mode, the D-pad / A / B / L / R belong to the list (dm_runeword.c)
     { uint64_t dm_padmode_page_filter(uint64_t); s->buttons = dm_padmode_page_filter(s->buttons); }   // 手柄模式我们自己的页（自定义页等）开着时，页声明的键归页（dm_padmode.c） | While one of our own pages (the Custom page etc.) is open in controller mode, the buttons the page declares belong to the page (dm_padmode.c)
-    { uint64_t dm_swapskill_filter(uint64_t); s->buttons = dm_swapskill_filter(s->buttons); }   // 副手组技能：换武器好之前压住那个键（dm_actions.c） | off-hand set skill: hold that key back until the weapon swap is done (dm_actions.c)
+    { uint64_t dm_swapskill_filter(uint64_t); s->buttons = dm_swapskill_filter(s->buttons); }
+    { uint64_t dm_aim_release_filter(uint64_t, uint64_t, int32_t *, int32_t *); s->buttons = dm_aim_release_filter(s->buttons, atomic_load(&g_pad_btn), &s->lx, &s->ly); }   // 松开才放：位移 / 落点类技能键按住时先不交、人停下瞄，松开再替玩家按（hle_private_aim.c） | cast on release: movement / ground zone skill buttons are withheld while held and the character stops to aim, then pressed for the player on release (hle_private_aim.c)   // 副手组技能：换武器好之前压住那个键（dm_actions.c） | off-hand set skill: hold that key back until the weapon swap is done (dm_actions.c)
     { static int trx, tryy, tdelay, held, tset = -1; if (tset < 0) { const char *e = getenv("DM_TEST_RSTICK"); tset = e && sscanf(e, "%d,%d,%d", &trx, &tryy, &tdelay) >= 2; }   // 测试开关 DM_TEST_RSTICK=rx,ry[,延迟次数]：按键脚本按着 A / B / X / Y 时把右摇杆置成这个值（模拟「按住技能钮拖动」，游戏自己也看得到右摇杆）；延迟 = 按下后第几次取手柄才开始给（真手指是先按下、再拖出方向） | test switch DM_TEST_RSTICK=rx,ry[,delay count]: while the key script holds A / B / X / Y, set the right stick to this value (simulates "hold a skill button and drag", the game itself also sees the right stick); delay = on which controller read after the press it starts being given (a real finger presses first, then drags out a direction)
       if (tset > 0) { held = (s->buttons & 0xf) ? held + 1 : 0; if (held > tdelay) { s->rx = trx; s->ry = tryy; } } }
     if (s->lx || s->ly || (km & PK_MASK & ~(uint64_t)PK_TOUCH)) atomic_store(&g_stick_ns, now_ns());   // 玩家的摇杆（前端 / 脚本伪键）最近一次非零；光标改写的摇杆不算 | the last time the player's stick (front end / script pseudo-keys) was non-zero; a stick rewritten by the cursor does not count
@@ -434,6 +437,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     if (km & PK_MASK & ~(uint64_t)PK_TOUCH) { void dm_cam_remap_stick(int32_t *, int32_t *, int32_t *, int32_t *); int32_t zx = 0, zy = 0; dm_cam_remap_stick(&s->lx, &s->ly, &zx, &zy); }
     s->attributes = ATTR_CONNECTED;
     atomic_store_explicit(&g_sampled_right,(uint32_t)s->rx|((uint64_t)(uint32_t)s->ry<<32),memory_order_release);
+    atomic_store_explicit(&g_sampled_right_pad,right_pad && (s->rx || s->ry),memory_order_release);
     atomic_store_explicit(&g_sampled_left,(uint32_t)s->lx|((uint64_t)(uint32_t)s->ly<<32),memory_order_release);
     receipt(s, id, style, km, read_start_ns);
 }

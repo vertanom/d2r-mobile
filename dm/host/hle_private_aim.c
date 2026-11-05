@@ -27,6 +27,7 @@ int dm_private_aim_vector(int32_t rx,int32_t ry,float out[2]) {
 #include "dm_input.h"
 #include "dm_aim.h"
 #include "dm_custom.h"
+#include "dm_uiscreen.h"
 #include <mach/mach.h>
 static int read_live(uint64_t a,void *out,size_t n) {
     vm_size_t copied=0;
@@ -54,14 +55,106 @@ static void cone_restore(void) {
 }
 // 取手柄处每帧调（hle_hid.c）：右摇杆归零了就把动过的两处恢复（拖完之后没有再施放时，不能把指定目标留在槽里）
 // Called every frame at the controller read (hle_hid.c): once the right stick returns to zero, restore the two places that were changed (when there is no further cast after the drag ends, the designated target must not be left in the slot)
+// ---- 技能形态（dm_aim.h 三类）：手柄技能记录 + 技能表的施放函数号。施放适配与「松开才放」都用 ----
+// ---- Skill shape (the three classes of dm_aim.h): the controller skill record + the skill table's cast function number. Used by both the cast adapter and "cast on release" ----
+typedef uint64_t (*Mgr)(void); typedef uint64_t (*Rec)(uint64_t,int32_t); typedef float (*Range)(uint64_t,uint64_t,int);
+static int free_get(const char *key, int def);   // aim_free.txt（见下） | aim_free.txt (see below)
+static const module_t *aim_main(void) { static const module_t *m; if (!m) for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i]; return m; }
+// pl = 玩家单位（+0x1bd 版本号挑技能表）。取不到施放函数号 = NONE（不放远、不进自由瞄准，与原先「取不到记录的一律不放远」一致） | pl = the player unit (+0x1bd version picks the skill table). Cast function not readable = NONE (not pushed far, no free aim, consistent with the former "anything whose record cannot be fetched is not pushed far")
+static int skill_shape(const module_t *m, uint64_t pl, int32_t sk, uint64_t *rec_out, float *dist_out, uint8_t *scaled_out, uint16_t *fn_out) {
+    uint64_t mg = ((Mgr)(m->base + 0x2acecc))(), rec = sk >= 0 ? ((Rec)(m->base + 0x2b4bc8))(mg, sk) : 0; float dist = 0; uint8_t scaled = 1, ver = 0; uint16_t fn = 0; int cls = DM_AIM_NONE;
+    if (rec && read_live(rec + 8, &dist, 4) && read_live(rec + 0x10, &scaled, 1) && pl && read_live(pl + 0x1bd, &ver, 1) && ver >= 1 && ver <= 3) {
+        uint64_t tbl = 0, base = 0, cnt = 0;
+        if (read_live((uint64_t)m->base + 0x2d64a18 + (uint64_t)ver * 16, &tbl, 8) && read_live(tbl + 0x11e8, &base, 8) && read_live(tbl + 0x11f0, &cnt, 8) && (uint64_t)sk < cnt &&
+            read_live(base + (uint64_t)sk * 0x2ec + 0x4e, &fn, 2)) cls = dm_aim_class(sk, fn, dist, scaled); }
+    if (rec_out) *rec_out = rec; if (dist_out) *dist_out = dist; if (scaled_out) *scaled_out = scaled; if (fn_out) *fn_out = fn; return cls;
+}
+// 实体键（A B X Y R ZR）现在绑的技能号：面 → 格表 main+0x2d13cbc（6 × {逻辑键, 普通格, 替代格 = 按着 ZL}）、格 → 技能表 main+0x2d5f0c0（每格 28 字节，武器第二组 +16 格；那格空着看第一组），读法同 dm_padmode.c / dm_freetp.c。没有 = −1
+// The skill id bound right now to a physical button (A B X Y R ZR): face -> slot table main+0x2d13cbc (6 × {logical key, normal slot, alternate slot = ZL held}), slot -> skill table main+0x2d5f0c0 (28 bytes per slot, the second weapon set +16 slots; an empty one falls back to the first set), read like dm_padmode.c / dm_freetp.c. None = -1
+static int32_t button_skill(const module_t *m, uint64_t bit, int zl) {
+    static const struct { uint64_t b; uint32_t lg; } face[6] = { { DM_BTN_A, 0x2000 }, { DM_BTN_B, 0x1000 }, { DM_BTN_X, 0x8000 }, { DM_BTN_Y, 0x4000 }, { DM_BTN_R, 0x200 }, { DM_BTN_ZR, 0x800 } };
+    uint32_t want = 0; for (int f = 0; f < 6; f++) if (face[f].b == bit) want = face[f].lg; if (!want) return -1;
+    int dm_swapskill_wset(void); int bank = dm_swapskill_wset() ? 16 : 0; const uint8_t *b = (const uint8_t *)m->base;
+    for (int i = 0; i < 6; i++) { uint32_t lg, sl[2], id = 0xffffffffu; memcpy(&lg, b + 0x2d13cbc + 12 * i, 4); memcpy(sl, b + 0x2d13cbc + 12 * i + 4, 8); if (lg != want || sl[zl != 0] >= 12) continue;
+        memcpy(&id, b + 0x2d5f0c0 + (uint64_t)(bank + sl[zl != 0]) * 28, 4); if (id == 0xffffffffu && bank) memcpy(&id, b + 0x2d5f0c0 + (uint64_t)sl[zl != 0] * 28, 4);
+        return id == 0xffffffffu ? -1 : (int32_t)id; }
+    return -1;
+}
+static float g_rg_seen[1024];   // 每个技能施放时游戏算出的射程（0x2b5c70，按等级）：「松开才放」预览落点用；没放过 = 手柄记录的缺省距离 | the range the game computed for each skill at cast time (0x2b5c70, by level): used by the "cast on release" landing preview; never cast = the controller record's default distance
+static void range_seen(int32_t sk, float rg) { if (sk >= 0 && sk < 1024 && rg > 0.0f && isfinite(rg)) g_rg_seen[sk] = rg; }
+// ---- 松开才放（Victor 2026-11-04：按住时预览跟着人走、碍事；想按住瞄好、松开才出）----
+// 开着时，实体手柄按下的技能键若绑的是位移 / 落点类：按住期间不交给游戏（人也停下，左摇杆只用来瞄），松开那一刻替玩家按 3 次取手柄长的一下，游戏按那时的方向放；
+// 飞弹类与其余照原样按下就放（瞬发不需要预览）。开关：aim_free.txt 的 release_cast（缺省 0）定开机时的值，手柄键位的宿主动作 RELEASECAST 切换。面板 / 局外 / 触屏布局下不拦，拦着时离开局内就当没按
+// ---- Cast on release (Victor 2026-11-04: while held the preview moves with the character and gets in the way; he wants to hold to aim and cast on release) ----
+// While on, a skill button pressed on the physical controller whose skill is movement / ground zone: not handed to the game while held (the character stops too; the left stick only aims), and at the moment of release it is pressed for the player for 3 controller reads, so the game casts with the direction of that moment;
+// skillshots and the rest still cast on press as before (instant casts need no preview). Switch: release_cast in aim_free.txt (default 0) sets the starting value, the controller remap host action RELEASECAST toggles it. Not intercepted in panels / outside a run / in the touch layout; a hold in progress that leaves the run counts as never pressed
+static _Atomic int g_rel = -1;
+static int release_on(void) { int v = atomic_load(&g_rel); if (v < 0) { v = free_get("release_cast", 0) != 0; atomic_store(&g_rel, v); } return v; }
+void dm_aim_release_toggle(void) { int on = !release_on(); atomic_store(&g_rel, on); LOG("松开才放：切换 → %s", on ? "开（位移 / 落点类按住瞄、松开放）" : "关（按下就放）"); }
+static struct { uint64_t bit; int zl, cls, inject; int32_t sk, lx, ly; } g_hold;
+static _Atomic int g_left_ovr; static _Atomic uint64_t g_left_ovr_v;
+static void hold_clear(void) { memset(&g_hold, 0, sizeof g_hold); atomic_store(&g_left_ovr, 0); }
+static void hold_left(int32_t lx, int32_t ly) { g_hold.lx = lx; g_hold.ly = ly; atomic_store(&g_left_ovr_v, (uint32_t)lx | (uint64_t)(uint32_t)ly << 32); atomic_store(&g_left_ovr, 1); }
+// 施放时取左摇杆：按住瞄的时候游戏收到的是 0（人不走），用按住期间玩家推的那份 | The left stick at cast time: while holding to aim the game receives 0 (the character does not walk), so use what the player pushed during the hold
+static void aim_left(int32_t *lx, int32_t *ly) { if (atomic_load(&g_left_ovr)) { uint64_t v = atomic_load(&g_left_ovr_v); *lx = (int32_t)(uint32_t)v; *ly = (int32_t)(uint32_t)(v >> 32); } else dm_input_sampled_left(lx, ly); }
+int dm_padmode_current(void);
+// 取手柄处（hle_hid.c fill，游戏主线程）：pad = 实体手柄此刻按着的键 | At the controller read (hle_hid.c fill, game main thread): pad = physical controller buttons held right now
+uint64_t dm_aim_release_filter(uint64_t buttons, uint64_t pad, int32_t *lx, int32_t *ly) {
+    static uint64_t prev; uint64_t fresh = pad & ~prev; prev = pad;
+    const module_t *m = aim_main(); int world = m && dm_uiscreen_ingame() && !dm_uiscreen_panel() && dm_padmode_current();
+    if (g_hold.inject) { buttons |= g_hold.bit | (g_hold.zl ? DM_BTN_ZL : 0); *lx = *ly = 0; if (--g_hold.inject == 0) hold_clear(); return buttons; }
+    if (g_hold.bit) {
+        if (!world) { LOG("松开才放：离开局内 / 开了面板，按着的技能 %d 不放", g_hold.sk); hold_clear(); return buttons; }
+        if (pad & g_hold.bit) { buttons &= ~g_hold.bit; hold_left(*lx, *ly); *lx = *ly = 0; return buttons; }
+        g_hold.inject = 3; buttons |= g_hold.bit | (g_hold.zl ? DM_BTN_ZL : 0); *lx = *ly = 0;
+        { static int lg; if (lg++ < 40) LOG("松开才放：松开 → 放技能 %d（类别 %d，左摇杆 %d,%d）", g_hold.sk, g_hold.cls, g_hold.lx, g_hold.ly); }
+        return buttons; }
+    if (!world || !release_on() || !(fresh & (DM_BTN_A | DM_BTN_B | DM_BTN_X | DM_BTN_Y | DM_BTN_R | DM_BTN_ZR))) return buttons;
+    uint64_t pl = ((uint64_t (*)(uint32_t))(m->base + 0x45f9d0))(*(uint32_t *)(m->base + 0x2d20e4c)); int zl = (pad & DM_BTN_ZL) != 0;
+    for (int b = 0; b < 16; b++) { uint64_t bit = 1ull << b; if (!(fresh & bit & (DM_BTN_A | DM_BTN_B | DM_BTN_X | DM_BTN_Y | DM_BTN_R | DM_BTN_ZR))) continue;
+        int32_t sk = button_skill(m, bit, zl); int cls = sk >= 0 ? skill_shape(m, pl, sk, NULL, NULL, NULL, NULL) : DM_AIM_NONE;
+        if (cls != DM_AIM_MOVE && cls != DM_AIM_ZONE) continue;
+        g_hold.bit = bit; g_hold.zl = zl; g_hold.cls = cls; g_hold.sk = sk; buttons &= ~bit; hold_left(*lx, *ly); *lx = *ly = 0;
+        { static int lg; if (lg++ < 40) LOG("松开才放：按住 %s%s = 技能 %d（类别 %d）→ 先不放，瞄", zl ? "ZL+" : "", b == 0 ? "A" : b == 1 ? "B" : b == 2 ? "X" : b == 3 ? "Y" : b == 7 ? "R" : "ZR", sk, cls); }
+        break; }
+    return buttons;
+}
+// ---- 瞄准指示（dm_aim.h dm_aim_view，前端 dm_aim_hud.m 画）：只在手柄版布局、镜头实验关着时 ----
+// 人物脚下的地面圈 + 朝瞄准方向的尖（实体手柄右摇杆推着时，或「松开才放」按住瞄的时候）；按住瞄时再加落点圈：位移类 = 左摇杆方向 × 射程（不推 = 原地），落点类 = 右摇杆方向 × 推的比例 × 射程。
+// 按下就放的施放不画（瞬发不需要预览）。每帧在取手柄处换成画面坐标发布（脚底取游戏自己的投影，dm_world.c）
+// ---- Aim indicator (dm_aim.h dm_aim_view, drawn by the front end dm_aim_hud.m): only in the controller layout and with the camera experiment off ----
+// A ground ring under the character + a tip toward the aim direction (while the physical controller right stick is pushed, or while holding to aim under "cast on release"); while holding to aim also a landing circle: movement = left stick direction × range (not pushed = in place), ground zone = right stick direction × push fraction × range.
+// Casts on press are not drawn (instant casts need no preview). Converted to picture coordinates and published every frame at the controller read (the feet come from the game's own projection, dm_world.c)
+static dm_aim_view g_av; static _Atomic uint32_t g_av_seq;
+int dm_cam_on(void); int dm_world_player_screen(float *fx, float *fy, int *W, int *H);
+static void aim_view_pump(void) {
+    dm_aim_view v; memset(&v, 0, sizeof v); float fx, fy; int W, H; const module_t *m = aim_main();
+    if (m && dm_padmode_current() && !dm_cam_on() && dm_world_player_screen(&fx, &fy, &W, &H)) {
+        float d[2]; int32_t rx = 0, ry = 0; dm_input_sampled_right(&rx, &ry); int rpad = dm_input_sampled_right_pad();
+        if (g_hold.bit && !g_hold.inject) {
+            uint64_t pl = ((uint64_t (*)(uint32_t))(m->base + 0x45f9d0))(*(uint32_t *)(m->base + 0x2d20e4c)); float dist = 0; skill_shape(m, pl, g_hold.sk, NULL, &dist, NULL, NULL);
+            float rg = g_hold.sk >= 0 && g_hold.sk < 1024 && g_rg_seen[g_hold.sk] > 0 ? g_rg_seen[g_hold.sk] : dist; v.kind = 3;
+            if (g_hold.cls == DM_AIM_MOVE) { v.lr = 1.0f; if (dm_private_aim_vector(g_hold.lx, g_hold.ly, d)) { v.dx = d[0]; v.dy = d[1]; v.lx = d[0] * rg; v.ly = d[1] * rg; } }
+            else { v.lr = 2.5f; if (dm_private_aim_vector(rx, ry, d)) { float f = rpad ? dm_aim_frac(sqrtf((float)rx * rx + (float)ry * ry) / 32767.0f) : 1.0f; v.dx = d[0]; v.dy = d[1]; v.lx = d[0] * f * rg; v.ly = d[1] * f * rg; } else v.kind = 1; } }
+        else if (rpad && dm_private_aim_vector(rx, ry, d)) { v.kind = 1; v.dx = d[0]; v.dy = d[1]; }
+        if (v.kind) { v.fx = fx / W; v.fy = fy / H; } }
+    atomic_fetch_add(&g_av_seq, 1); g_av = v; atomic_fetch_add(&g_av_seq, 1);
+}
+int dm_aim_view_get(dm_aim_view *v) {
+    for (int t = 0; t < 4; t++) { uint32_t a = atomic_load(&g_av_seq); if (a & 1) continue; *v = g_av; if (atomic_load(&g_av_seq) == a) return v->kind; }
+    memset(v, 0, sizeof *v); return 0;
+}
 void dm_aim_cone_pump(void) {
+    aim_view_pump();
     if (!atomic_load(&g_cone_set)) return; int32_t rx = 0, ry = 0; dm_input_sampled_right(&rx, &ry);
     if (!(getenv("DM_TEST_AIM") || getenv("DM_TEST_AIM_AT")) && !rx && !ry && !dm_aim_free_on() && !atomic_load(&g_cone_keep)) { cone_restore(); return; }   // 自由瞄准开着时不恢复：右摇杆本来就不动 | not restored while free aim is on: the right stick is not moved then anyway
 }
 // ---- 自由瞄准（PC 按住 Shift 放技能 = 不选怪、朝方向放）：手柄键位的宿主动作 FREEAIM（按住）/ FREEAIMTOGGLE（开关），dm_gamepad.m 调 dm_aim_free_set ----
+// 按住是「反过来」（dm_aim_ignore_target）：位移类平常就不选怪，按住时改回选怪。
 // 生效时表里的技能（aim_free.txt，缺省 = 位移类，见 dm_aim.h）：不走锥内选怪，指定目标槽清零、alwaysIgnoreTarget 置 1（同上面「锥内没怪」那条已实测的路），方向取左摇杆。
 // 测试开关 DM_TEST_FREEAIM=1 = 一直开着（按键脚本没有宿主动作）
 // ---- Free aim (the PC's hold-Shift cast = pick no monster, cast by direction): the controller remap host actions FREEAIM (held) / FREEAIMTOGGLE (on/off), dm_gamepad.m calls dm_aim_free_set ----
+// Holding is "the inverse" (dm_aim_ignore_target): movement skills usually pick no monster, and pick one again while it is held.
 // While in effect the listed skills (aim_free.txt, default = movement, see dm_aim.h) skip the cone pick, clear the designated target slot and set alwaysIgnoreTarget to 1 (the same path as "no monster in the cone" above, already measured), with the direction taken from the left stick.
 // Test switch DM_TEST_FREEAIM=1 = always on (the key script has no host actions)
 static _Atomic int g_free_hold, g_free_toggle;
@@ -69,7 +162,8 @@ void dm_aim_free_set(int hold, int toggle_edge) {
     atomic_store(&g_free_hold, hold != 0);
     if (toggle_edge) { int on = !atomic_fetch_xor(&g_free_toggle, 1); LOG("自由瞄准：切换 → %s", on ? "开" : "关"); }
 }
-int dm_aim_free_on(void) { static int t = -1; if (t < 0) t = getenv("DM_TEST_FREEAIM") != NULL; return t || atomic_load(&g_free_hold) || atomic_load(&g_free_toggle); }
+static int free_toggle_on(void) { static int t = -1; if (t < 0) t = getenv("DM_TEST_FREEAIM") != NULL; return t || atomic_load(&g_free_toggle); }
+int dm_aim_free_on(void) { return free_toggle_on() || atomic_load(&g_free_hold); }
 // aim_free.txt（自定义目录，键=值，# 注释）：move / zone / shot = 类别开关，skill_<号> = 单个技能。整份缓存、2 秒重读一次（按住连放每拍都要查）
 // aim_free.txt (custom directory, key=value, # comments): move / zone / shot = class switches, skill_<id> = a single skill. Cached whole, re-read every 2 seconds (a held recast asks every tick)
 static char g_free_txt[2048]; static uint64_t g_free_txt_ns;
@@ -149,7 +243,6 @@ void svc_private_skill_aim(uint64_t *regs) {
         // 落点距离无所谓的技能把方向放大，让目标点落到 24 格外（目标格相对角色真实位置的取整误差 ≤1.7°；按整数格差量、不计角色站位小数时 ≤3°——16 格时真机按格差量到正上 / 正下各偏 5°）。实测（圣骑普通攻击，目标点 12 格外按住 4 发）：人原地挥砍、不走动。射程更大的技能落点有意义，不动
         // Target point = position + direction × range (the game multiplies in 0x2fac70, range comes from 0x2b5c70), then rounded to a cell. Melee-type range is only 2–4 cells, after rounding only 8 direction steps remain (diagonals snap to cell edges);
         // for skills whose landing distance does not matter the direction is scaled up so the target point lands beyond 24 cells (rounding error of the target cell relative to the character's real position ≤1.7°; measured by integer cell difference, ignoring the fractional part of the character's position, ≤3° -- at 16 cells the real device measured by cell difference 5° off for straight up / straight down each). Measured (Paladin normal attack, target point beyond 12 cells, held for 4 casts): the character swings in place and does not walk. For skills with a larger range the landing point is meaningful, untouched
-        typedef float (*Range)(uint64_t,uint64_t,int); typedef uint64_t (*Mgr)(void);
         // 哪些技能放远，按游戏自己的手柄技能配置判（包内 controllerskillsettings.json，载入后是手柄技能记录，main+0x2b4bc8(管理器, 技能号) 取）：
         // 记录 +8 = defaultTargetDistance（设计师给这个技能填的手柄落点距离，射程函数 0x2b5c70 返回的就是它），+0x10 = 「按技能等级算」标志。
         // 缺省 2.0 = 没填 = 落点距离无所谓（普通攻击、近战挥砍、飞弹、原地施法）→ 放远取方向；填了距离的（冲锋 12、旋风 10、跳跃 16.6、传送 23、
@@ -162,28 +255,28 @@ void svc_private_skill_aim(uint64_t *regs) {
         // Blizzard / traps 12–15, summons 4–6) the landing point is meaningful → native direction × distance, untouched. The only one with "distance 2.0 but still displaces" is Dragon Flight, excluded by its cast function number:
         // skill table record (stride 0x2ec, [version table + 0x11e8]) +0x4e = srvdofunc, 27 / 52 / 67 / 76 / 77 / 78 are the displacement kind (Teleport / Dragon Flight / Charge / Whirlwind / Leap / Leap Attack).
         // Anything whose record cannot be fetched is not pushed far. Current skill id = record +0xd4c of this player slot (x25) in the manager (x23 of 0x2fae98) (the same place 0x2faf50–0x2faf54 read)
-        typedef uint64_t (*Rec)(uint64_t,int32_t);
         int32_t sk=-1;read_live(regs[23]+(uint64_t)(uint32_t)regs[25]*0xb8+0xd4c,&sk,4);
-        uint64_t mg=((Mgr)(m->base+0x2acecc))(),rec=sk>=0?((Rec)(m->base+0x2b4bc8))(mg,sk):0;
-        // 类别（dm_aim.h）：施放函数号取不到的一律 NONE（不放远、不进自由瞄准），与原先「取不到记录的一律不放远」一致 | Class (dm_aim.h): anything whose cast function cannot be read is NONE (not pushed far, no free aim), consistent with the former "anything whose record cannot be fetched is not pushed far"
-        float dist=0.0f;uint8_t scaled=1,ver=0;uint16_t fn=0;int cls=DM_AIM_NONE;
-        if(rec && read_live(rec+8,&dist,4) && read_live(rec+0x10,&scaled,1) && read_live(regs[1]+0x1bd,&ver,1) && ver>=1 && ver<=3) {
-            uint64_t tbl=0,base=0,cnt=0;
-            if(read_live((uint64_t)m->base+0x2d64a18+(uint64_t)ver*16,&tbl,8) && read_live(tbl+0x11e8,&base,8) && read_live(tbl+0x11f0,&cnt,8) && (uint64_t)sk<cnt &&
-               read_live(base+(uint64_t)sk*0x2ec+0x4e,&fn,2)) cls=dm_aim_class(fn,dist,scaled);
-        }
+        uint64_t mg=((Mgr)(m->base+0x2acecc))(),rec=sk>=0?((Rec)(m->base+0x2b4bc8))(mg,sk):0;   // 记录也给锥内选怪 / 自由瞄准置 alwaysIgnoreTarget 用 | the record is also used by the cone pick / free aim to set alwaysIgnoreTarget
+        float dist=0.0f;uint8_t scaled=1;uint16_t fn=0;int cls=skill_shape(m,regs[1],sk,NULL,&dist,&scaled,&fn);   // 类别（dm_aim.h，skill_shape 见上） | class (dm_aim.h, skill_shape above)
         int far=cls==DM_AIM_SHOT;
-        if(rec && dm_aim_ignore_target(cls,sk,fr,free_get)) {   // 自由瞄准：左摇杆方向（松着 = 原方向），不选怪 | free aim: the left stick's direction (released = the original direction), no monster picked
-            int32_t lx=0,ly=0;dm_input_sampled_left(&lx,&ly);float lv[2],f=test_frac();int lon=dm_private_aim_vector(lx,ly,lv);
+        if(rec && dm_aim_ignore_target(cls,sk,free_toggle_on(),atomic_load(&g_free_hold),free_get)) {   // 自由瞄准：左摇杆方向（松着 = 原方向），不选怪 | free aim: the left stick's direction (released = the original direction), no monster picked
+            int32_t lx=0,ly=0;aim_left(&lx,&ly);float lv[2],f=test_frac();int lon=dm_private_aim_vector(lx,ly,lv);
             if(lon){direction[0]=lv[0]*f;direction[1]=lv[1]*f;} else {direction[0]*=f;direction[1]*=f;}
             cone_restore(); *(uint64_t *)(mg+0xd10)=0; g_cone_slot_mgr=mg; g_cone_rec=rec; g_cone_rec_was=*(uint8_t *)(rec+0x18); *(uint8_t *)(rec+0x18)=1; atomic_store(&g_cone_set,1); atomic_store(&g_cone_keep,!fr);
+            range_seen(sk,((Range)(m->base+0x2b5c70))(mg,regs[1],0));
             { static int lg; if(lg++<40)LOG("自由瞄准：技能号 %d 类别 %d 施放函数 %u → 不选怪，方向 %s（%.2f, %.2f）比例 %.2f",sk,cls,fn,lon?"左摇杆":"原方向",direction[0],direction[1],f); }
         } else if(!active) { if(atomic_load(&g_cone_set))cone_restore(); }   // 不拖 = 原生 | no drag = native
         else {
-            float rg=((Range)(m->base+0x2b5c70))(mg,regs[1],0),k=(far && rg>0.0f && isfinite(rg))?24.0f/rg:(cls==DM_AIM_MOVE||cls==DM_AIM_ZONE)?test_frac():1.0f;
+            // 落点类 + 实体手柄右摇杆：角度给方向、推的幅度给距离（dm_aim_frac：推到底 = 射程），不进锥内选怪（锁怪会把落点拉到怪身上）；触屏拖动照旧
+            // Ground zone + physical controller right stick: the angle gives the direction and the push amount the distance (dm_aim_frac: fully pushed = the range), no cone pick (locking a monster would pull the landing point onto it); touch drags unchanged
+            int zone=cls==DM_AIM_ZONE && dm_input_sampled_right_pad() && rec; float zf=zone?dm_aim_frac(sqrtf((float)rx*rx+(float)ry*ry)/32767.0f):1.0f;
+            float rg=((Range)(m->base+0x2b5c70))(mg,regs[1],0),k=(far && rg>0.0f && isfinite(rg))?24.0f/rg:zone?zf:(cls==DM_AIM_MOVE||cls==DM_AIM_ZONE)?test_frac():1.0f;
             { static int lg; if(getenv("DM_SKILL_AIM_LOG") && lg++<12)LOG("瞄准适配：技能号 %d 手柄落点距离 %.2f 施放函数 %u 类别 %d 射程 %.2f 放大 %.1f",sk,dist,fn,cls,rg,k); }
             direction[0]=vec[0]*k;direction[1]=vec[1]*k;
-            if(cone_cos()<=1.0f) {   // 手指方向选目标 | target selection by finger direction
+            range_seen(sk,rg);
+            if(zone) { cone_restore(); *(uint64_t *)(mg+0xd10)=0; g_cone_slot_mgr=mg; g_cone_rec=rec; g_cone_rec_was=*(uint8_t *)(rec+0x18); *(uint8_t *)(rec+0x18)=1; atomic_store(&g_cone_set,1);
+                { static int lg; if(lg++<40)LOG("落点瞄准：技能号 %d 施放函数 %u → 推 %.0f%% 射程 %.1f 格，不选怪",sk,fn,zf*100.0f,rg); } }
+            else if(cone_cos()<=1.0f) {   // 手指方向选目标 | target selection by finger direction
                 cone_restore(); int nmon=0; float bc=0; float p0[2]={position[0],position[1]};
                 uint64_t tgt=cone_pick(m,regs[1],p0,vec,cone_cos(),&nmon,&bc);
                 if(tgt){ *(uint64_t *)(mg+0xd10)=tgt; g_cone_slot_mgr=mg; }

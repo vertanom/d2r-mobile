@@ -13,6 +13,7 @@ void dm_update_pump(void) {}      // 选角页构建号与新版本提示（dm_u
 void dm_num_set(int n) { (void)n; }
 void dm_actions_pump(void) {}
 uint64_t dm_swapskill_filter(uint64_t b) { return b; }   // 副手组技能（dm_actions.c）：不压键 | swap-set skill (dm_actions.c): does not suppress keys
+uint64_t dm_aim_release_filter(uint64_t b, uint64_t raw, int32_t *lx, int32_t *ly) { (void)raw; (void)lx; (void)ly; return b; }   // 松开才放（hle_private_aim.c）：单测里不压键 | cast on release (hle_private_aim.c): does not withhold keys in the unit test
 uint64_t dm_runeword_pad_filter(uint64_t b) { return b; }   // 手柄模式符文之语清单（dm_runeword.c）：不吃键 | Runeword list in controller mode (dm_runeword.c): swallow no buttons
 uint64_t dm_padmode_page_filter(uint64_t b) { return b; }   // 手柄模式我们自己的页（dm_padmode.c）：不吃键 | Our own pages in controller mode (dm_padmode.c): swallow no buttons
 int dm_padmode_input_gate(uint64_t *b) { (void)b; return 0; }   // 手柄 / 触屏切换事务的输入闸（dm_padmode.c）：没在切 | Input gate of the controller / touch switch transaction (dm_padmode.c): not switching

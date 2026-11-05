@@ -104,6 +104,14 @@ int main(void) {
     CHECK(dm_padbind_step(&t, &st, DM_BTN_R, 0, 0, 0, &w) == 0 && st.acts == DM_PADACT_FREEAIM, "按住 R：acts 里有 FREEAIM，不发给游戏");
     dm_padbind_step(&t, &st, 0, 10, 0, 0, &w); CHECK(st.acts == 0, "松 R：FREEAIM 清掉");
     { char buf[256]; dm_padbind_table t2; CHECK(dm_padbind_format(&t, buf, sizeof buf) && strstr(buf, "R=FREEAIM\n") && strstr(buf, "MINUS+R=FREEAIMTOGGLE") && dm_padbind_parse(buf, &t2), "FREEAIM 写回去再读得回来"); }
+    // 键盘那栏 | The keyboard column
+    { dm_padbind_table a, b; char buf[1024]; int g = dm_padbind_key_index(5), f1 = dm_padbind_key_index(122);
+      CHECK(g >= 0 && f1 >= 0 && id.kout[g] == DM_BTN_RS && id.kout[f1] == 0 && dm_padbind_key_index(13) < 0, "缺省：G = 按右摇杆，F1 不发；W 不进表");
+      CHECK(dm_padbind_parse("RS=NONE\nKEY_G=NONE\nkey_f1=RS\nKEY_T=TOWNPORTAL", &a) && a.out[5] == 0 && a.kout[g] == 0 && a.kout[f1] == DM_BTN_RS && a.kout[dm_padbind_key_index(17)] == DM_PADACT_TOWNPORTAL, "KEY_ 行：键盘键改发 / 不发 / 宿主动作，大小写不论");
+      CHECK(!dm_padbind_parse("KEY_W=A", &t) && !dm_padbind_parse("KEY_=A", &t) && !dm_padbind_parse("KEY_G+UP=A", &t), "WASD / 空名 / 键盘组合：拒绝");
+      CHECK(dm_padbind_format(&a, buf, sizeof buf) && strstr(buf, "KEY_G=NONE\n") && strstr(buf, "KEY_F1=RS\n") && !strstr(buf, "KEY_J"), "写出：只写改过的键盘键");
+      CHECK(dm_padbind_parse(buf, &b) && !memcmp(&a, &b, sizeof a), "键盘那栏读回来是同一张表");
+      CHECK(dm_padbind_parse("KEY_G=NONE", &a) && dm_padbind_is_identity(&a), "只改键盘：手柄这层仍算原样"); }
     printf("== %d 项，失败 %d ==\n", checks, fails);
     return fails != 0;
 }

@@ -40,6 +40,7 @@ void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry
 void dm_input_sampled_right(int32_t *rx,int32_t *ry);
 // 左摇杆同样取游戏实际收到的那一份（自由瞄准朝左摇杆方向放，hle_private_aim.c） | The left stick likewise as the game actually received it (free aim casts the left stick's way, hle_private_aim.c)
 void dm_input_sampled_left(int32_t *lx,int32_t *ly);
+int dm_input_sampled_right_pad(void);   // 1 = 那份右摇杆来自实体手柄（不是触屏拖动） | 1 = that right stick sample came from the physical controller (not a touch drag)
 // 自由瞄准（PC 的 Shift）：hold = 按住键此刻按着；toggle_edge = 切换键按下一次（开 ↔ 关）。dm_aim_free_on = 两者之一生效 | Free aim (the PC's Shift): hold = the hold button is down right now; toggle_edge = the toggle button went down once (on <-> off). dm_aim_free_on = either is in effect
 void dm_aim_free_set(int hold,int toggle_edge);
 int dm_aim_free_on(void);

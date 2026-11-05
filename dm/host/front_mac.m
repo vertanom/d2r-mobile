@@ -11,9 +11,11 @@
 #import <ImageIO/ImageIO.h>
 #include "dm.h"
 #include "dm_input.h"
+#include "dm_padbind.h"
 #include "dm_uiscreen.h"
 #include "touch_mac.h"
 #import "../ios/Sources/dm_rift_hud.h"
+#import "../ios/Sources/dm_aim_hud.h"
 void mtl_set_ui_rect_fn(void (*fn)(double *y, double *h));
 static void ui_rect_frac(double *fy, double *fh) { int x, y, w, h, rw = 0, rh = 0; dm_ui_rect(&x, &y, &w, &h); if (dm_screen_real(&rw, &rh) && rh > 0) { *fy = (double)y / rh; *fh = (double)h / rh; } }   // 同 front_ios.m：界面矩形的纵向位置与高（占画面高的比例） | Same as front_ios.m: vertical position and height of the UI rectangle (as fractions of the frame height)
 __attribute__((constructor)) static void ui_shift_reg(void) { mtl_set_ui_rect_fn(ui_rect_frac); }   // 不开窗口的跑法（截图 / 闸门）也要生效，所以不放在建图层那里 | Must also take effect when running without a window (screenshots / gate checks), so it is not placed where the layer is created
@@ -139,8 +141,9 @@ double front_display_refresh(char *name, size_t n) {
 - (void)keys:(id)s { (void)s; show_keys(); }
 - (void)share:(id)s { (void)s; share_logs_ui(); }
 - (void)pad:(id)s { (void)s; void dm_padbind_show(NSWindow *); dm_padbind_show(g_win); }
+- (void)aimhud:(id)s { (void)s; void dm_aimhud_show(NSWindow *); dm_aimhud_show(g_win); }
 @end
-static uint64_t g_btn;
+static uint64_t g_btn, g_kbtn;   // g_kbtn = 键位表键盘那栏此刻按着的 Switch 键（与鼠标 / 回车 / Esc 的 g_btn 分开，发出时合起来） | g_kbtn = Switch buttons held right now through the key table's keyboard column (kept apart from g_btn of mouse / Return / Esc, merged when sent)
 static int g_w, g_a, g_s, g_d;
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
@@ -157,27 +160,26 @@ static NSPoint g_test_last;   // 合成鼠标脚本：上一条带坐标的指�
 static int g_wheel;   // 滚轮：+1 / −1 = 右摇杆向上 / 向下推一小会儿（原版手柄版用右摇杆滚列表） | Wheel: +1 / -1 = push the right stick up / down for a short while (the original gamepad UI scrolls lists with the right stick)
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
-    dm_input_set(g_btn, lx, ly, 0, g_wheel * 32767);
+    dm_input_set(g_btn | g_kbtn, lx, ly, 0, g_wheel * 32767);
 }
+// 回车 / Esc 不进键位表（App 形态由 touch_mac.c 按当前页决定，见那里）；其余游戏键走键位表的键盘那栏（dm_padbind.h dm_padbind_keys，缺省 = 帮助页的对照：
+// J K U I → A B X Y，F G → 按摇杆，Q E Z C → L R ZL ZR，Tab → −，= → ＋，空格 → A，方向键 → 十字键），可在「手柄按键…」窗口改（dm_gamepad_key）
+// Return / Esc are not in the key table (in App form touch_mac.c decides by the current page, see there); the other game keys go through the key table's keyboard column (dm_padbind.h dm_padbind_keys, default = the Help page's reference:
+// J K U I -> A B X Y, F G -> stick presses, Q E Z C -> L R ZL ZR, Tab -> −, = -> +, Space -> A, arrow keys -> D-pad), changeable in the "Controller Buttons..." window (dm_gamepad_key)
 static int key_bit(unsigned short code) {
     switch (code) {
-        case 38: return 0;  case 40: return 1;  case 32: return 2;  case 34: return 3;    // J K U I → A B X Y
-        case 3: return 4;   case 5: return 5;                                            // F G → 按摇杆 | F G → press stick
-        case 12: return 6;  case 14: return 7;  case 6: return 8;   case 8: return 9;    // Q E Z C → L R ZL ZR
-        case 36: return g_live ? 40 : 10; case 48: return 11;                            // 回车 Tab → + −（App 形态：回车交给 touch_mac.c 按当前页决定是 ＋ 还是确认，见那里） | Return Tab -> + - (App form: Return is handed to touch_mac.c, which decides by the current page whether it is + or confirm, see there)
-        case 24: case 69: return 10;                                                     // = 键（＋ 那个键）、小键盘 + → ＋ | the = key (the one with +) and keypad + -> +
-        case 49: return 0;                                                               // 空格 → A（确认） | Space -> A (confirm)
+        case 36: return g_live ? 40 : 10;                                                // 回车 → ＋（App 形态交给 touch_mac.c） | Return -> + (App form: handed to touch_mac.c)
         case 53: return g_live ? 41 : -1;                                                // Esc → 返回（App 形态；局内没有面板时是开功能页，touch_mac.c） | Esc -> back (App form; with no panel open in game it opens the function page, touch_mac.c)
-        case 123: return 12; case 126: return 13; case 124: return 14; case 125: return 15; // ← ↑ → ↓
     }
     return -1;
 }
 static void on_key(NSEvent *e, int down) {
     unsigned short c = e.keyCode;
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
-    int b = key_bit(c);
-    if (down && (b >= 0 || c == 13 || c <= 2)) dm_padmode_request_glyph(DM_GLYPH_KBD);   // 按了游戏用的键：键位图标换成键盘键帽（鼠标移动 / 点击不算） | a key used by the game was pressed: switch the key icons to keyboard key caps (mouse moves / clicks do not count)
+    int b = key_bit(c), k = dm_padbind_key_index(c);
+    if (down && (b >= 0 || k >= 0 || c == 13 || c <= 2)) dm_padmode_request_glyph(DM_GLYPH_KBD);   // 按了游戏用的键：键位图标换成键盘键帽（鼠标移动 / 点击不算） | a key used by the game was pressed: switch the key icons to keyboard key caps (mouse moves / clicks do not count)
     if (b >= 0) g_btn = down ? (g_btn | 1ull << b) : (g_btn & ~(1ull << b));
+    if (k >= 0) { uint64_t dm_gamepad_key(int idx, int down); g_kbtn = dm_gamepad_key(k, down); }
     push();
 }
 
@@ -216,6 +218,7 @@ void front_run(void (*guest)(void)) {
             (void)timer;
             BOOL hide = !dm_uiscreen_ingame() || (g_live && !dm_touch_host_world_active());
             dm_rift_hud_draw(v, NSRectToCGRect(game_rect()), hide);
+            dm_aim_hud_draw(v, NSRectToCGRect(game_rect()), hide);   // 手柄瞄准指示（dm_aim_hud.m） | controller aim indicator (dm_aim_hud.m)
         }];
         [NSRunLoop.mainRunLoop addTimer:riftHUDTimer forMode:NSRunLoopCommonModes];
         [win center];
@@ -229,7 +232,8 @@ void front_run(void (*guest)(void)) {
           NSMenu *(^add)(const char *) = ^NSMenu *(const char *t) { NSMenuItem *it = [NSMenuItem new]; [bar addItem:it]; NSMenu *m = [[NSMenu alloc] initWithTitle:@(t)]; it.submenu = m; return m; };
           [[add("") addItemWithTitle:@(ui("dmAppQuit")) action:@selector(quit:) keyEquivalent:@"q"] setTarget:ctl];
           NSMenuItem *fs = [add(ui("dmAppMenuView")) addItemWithTitle:@(ui("dmAppFullscreen")) action:@selector(toggleFullScreen:) keyEquivalent:@"f"]; fs.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
-          { NSMenuItem *pi = [add(ui("dmPadMenu")) addItemWithTitle:@(ui("dmPadTitle")) action:@selector(pad:) keyEquivalent:@","]; pi.target = ctl; }   // 手柄按键窗口（padbind_mac.m） | controller buttons window (padbind_mac.m)
+          { NSMenu *pm = add(ui("dmPadMenu")); NSMenuItem *pi = [pm addItemWithTitle:@(ui("dmPadTitle")) action:@selector(pad:) keyEquivalent:@","]; pi.target = ctl;
+            [[pm addItemWithTitle:@(ui("dmAimTitle")) action:@selector(aimhud:) keyEquivalent:@""] setTarget:ctl]; }   // 手柄按键窗口（padbind_mac.m）、瞄准指示窗口（aimhud_mac.m） | controller buttons window (padbind_mac.m), aim indicator window (aimhud_mac.m)
           { NSMenu *hm = add(ui("dmAppMenuHelp")); [[hm addItemWithTitle:@(ui("dmAppKeysTitle")) action:@selector(keys:) keyEquivalent:@""] setTarget:ctl]; [[hm addItemWithTitle:@(ui("dmAppShareLog")) action:@selector(share:) keyEquivalent:@""] setTarget:ctl]; }
           NSApp.mainMenu = bar; }
         { void dm_gamepad_start(void (*on_mode)(int pad)); dm_gamepad_start(NULL); }   // 手柄（与 iOS 壳共用 ios/Sources/dm_gamepad.m）：连上即用，与键盘并存 | Gamepad (ios/Sources/dm_gamepad.m, shared with the iOS shell): works as soon as it is connected, alongside the keyboard
@@ -405,7 +409,7 @@ void front_run(void (*guest)(void)) {
                   LOG("DM_TEST_COVER：盖上 %.1f 秒，游戏窗口%s是主窗口", dur, win.isKeyWindow ? "" : "不");
                   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(dur * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [c orderOut:nil]; LOG("DM_TEST_COVER：拿开"); });
               }); }
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (!win.miniaturized) dm_focus_set(2); g_btn = 0; g_w = g_a = g_s = g_d = 0; push(); { void dm_gamepad_reset(void); dm_gamepad_reset(); } }];   // 失焦：键盘和手柄按着的键清掉（松开事件收不到） | Focus lost: clear the keys held on keyboard and gamepad (their release events will not arrive)
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (!win.miniaturized) dm_focus_set(2); g_btn = g_kbtn = 0; g_w = g_a = g_s = g_d = 0; push(); { void dm_gamepad_reset(void); dm_gamepad_reset(); } }];   // 失焦：键盘和手柄按着的键清掉（松开事件收不到） | Focus lost: clear the keys held on keyboard and gamepad (their release events will not arrive)
         [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_focus_set(1); }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
