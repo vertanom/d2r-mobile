@@ -1197,6 +1197,10 @@ static void bg_relaunch_test(void) {
     if (g_host_up) { dm_guest_heap_last(h); gpu = mtl_gpu_allocated_mb(); }
     plog("【内存告警】系统发来内存告警（本局第 %d 次，进程已活 %.0f 秒，applicationState=%ld）：常驻 %llu MB，显卡已分配 %llu MB，游戏堆 %llu MB 余量 %llu MB 最大可分配块 %llu KB，离系统内存上限还有 %llu MB",
          n, since_start() / 1000.0, (long)a.applicationState, fp, gpu, h[0], h[1], h[2], (unsigned long long)(os_proc_available_memory() >> 20));
+    // 内存告警后系统随时可能杀进程（不走进后台的存盘）：请游戏下一拍存一次盘（同 resign_save，不等提交）；20 秒内只请一次
+    // After a memory warning the system may kill the process at any time (without the enter-background save): ask the game to save on the next tick (same as resign_save, no waiting for the commit); at most once per 20 seconds
+    if (g_host_up) { int dm_ingame_now(void); int dm_request_save(void); static double last_ms = -1e9; double t = since_start();
+        if (t - last_ms >= 20000 && dm_ingame_now() && dm_request_save()) { last_ms = t; plog("【内存告警】请游戏下一拍存一次盘（不等）"); } }
 }
 - (void)application:(UIApplication *)a handleEventsForBackgroundURLSession:(NSString *)ident completionHandler:(void (^)(void))done {
     plog("boot: 系统交来后台下载会话 %s 的事件（applicationState=%ld，宿主%s）", ident.UTF8String, (long)a.applicationState, g_host_up ? "在跑" : "没起");

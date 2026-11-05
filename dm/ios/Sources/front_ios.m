@@ -1482,6 +1482,13 @@ void front_ios_lifecycle_install(void) {
     { g_dm_thermal = (int)NSProcessInfo.processInfo.thermalState; LOG("温控档位 %d（启动）", g_dm_thermal); LOG("持续执行档：%d（1 = 系统已按稳态功率限制本进程）", (int)[NSProcessInfo.processInfo hasPerformanceProfile:NSProcessPerformanceProfileSustained]);
       [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n;
           int t = (int)NSProcessInfo.processInfo.thermalState; if (t != g_dm_thermal) { LOG("温控档位 %d → %d", g_dm_thermal, t); g_dm_thermal = t; } }]; }
+    // 局内定时存盘：原版 5 分钟才自动存一次，手机上进程随时可能因内存被系统杀掉（不走进后台的存盘），丢掉的就是这段进度。
+    // 每 60 秒请游戏下一拍走一次它自己的定时存盘（同 resign_save，不等提交、不挡主线程）；只在前台跑（NSTimer 随主线程挂起）。DM_AUTOSAVE_S=秒 改间隔，0 = 关
+    // In-run timed save: the original game autosaves only every 5 minutes, and on a phone the process may be killed for memory at any time (without the enter-background save), losing that progress.
+    // Every 60 seconds ask the game to run its own timed save on the next tick (same as resign_save, no waiting for the commit, does not block the main thread); runs only in the foreground (the NSTimer is suspended with the main thread). DM_AUTOSAVE_S=seconds changes the interval, 0 = off
+    { const char *as = getenv("DM_AUTOSAVE_S"); double iv = as ? atof(as) : 60;
+      if (iv > 0) [NSTimer scheduledTimerWithTimeInterval:iv repeats:YES block:^(NSTimer *tm) { (void)tm; int dm_ingame_now(void); int dm_request_save(void);
+          if (dm_ingame_now() && dm_request_save()) LOG("前端：定时存盘（每 %.0f 秒），请游戏下一拍存一次盘（不等）", iv); }]; }
     // 浸泡（DM_SOAK，diag.c 每 N 秒写一行 TSV）：真机另每 60 秒记一行温控档位（0 正常 / 1 微热 / 2 严重 / 3 危急），看发热降频与帧时间的关系
     // Soak (DM_SOAK, diag.c writes one TSV line every N seconds): on a real device additionally log one thermal state line every 60 seconds (0 nominal / 1 fair / 2 serious / 3 critical), to see how thermal throttling relates to frame time
     if (getenv("DM_SOAK")) {
