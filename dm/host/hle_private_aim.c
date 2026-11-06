@@ -138,6 +138,10 @@ static void aim_view_pump(void) {
             else { v.lr = 2.5f; if (dm_private_aim_vector(rx, ry, d)) { float f = rpad ? dm_aim_frac(sqrtf((float)rx * rx + (float)ry * ry) / 32767.0f) : 1.0f; v.dx = d[0]; v.dy = d[1]; v.lx = d[0] * f * rg; v.ly = d[1] * f * rg; } else v.kind = 1; } }
         else if (rpad && dm_private_aim_vector(rx, ry, d)) { v.kind = 1; v.dx = d[0]; v.dy = d[1]; }
         if (v.kind) { v.fx = fx / W; v.fy = fy / H; } }
+    // 测试开关 DM_TEST_AIM=dx,dy[,lx,ly,lr]：没有实体手柄也发布一份（方向按格；带后三项 = 按住瞄、带落点圈），给无头宿主截图核贴花 | test switch DM_TEST_AIM=dx,dy[,lx,ly,lr]: publish one without a physical controller (direction in cells; with the last three = holding to aim, with a landing circle), for checking the decal in headless screenshots
+    { static int tn = -1; static float ta[5]; if (tn < 0) { const char *e = getenv("DM_TEST_AIM"); tn = e ? sscanf(e, "%f,%f,%f,%f,%f", &ta[0], &ta[1], &ta[2], &ta[3], &ta[4]) : 0; }
+      float n = hypotf(ta[0], ta[1]);
+      if (tn >= 2 && n > 0 && m && !dm_cam_on() && dm_world_player_screen(&fx, &fy, &W, &H)) { v.kind = tn >= 5 ? 3 : 1; v.dx = ta[0] / n; v.dy = ta[1] / n; v.fx = fx / W; v.fy = fy / H; if (tn >= 5) { v.lx = ta[2]; v.ly = ta[3]; v.lr = ta[4]; } } }
     atomic_fetch_add(&g_av_seq, 1); g_av = v; atomic_fetch_add(&g_av_seq, 1);
 }
 int dm_aim_view_get(dm_aim_view *v) {

@@ -18,6 +18,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <ImageIO/ImageIO.h>
 #include <sys/stat.h>
+#include <pthread.h>
 #include "../../host/dm_aim.h"
 #include "../../host/dm.h"
 
@@ -25,6 +26,8 @@ typedef struct { CGFloat r, g, b, tint, alpha, thick, size; } aim_look;
 static aim_look g_look = { 199 / 255.0, 179 / 255.0, 119 / 255.0, 0, 0.85, 2, 1 };   // 缺省：原版金字色（只在描线时用）、不染色、圆环加粗一倍（Victor 2026-11-05：原图那一圈太细） | defaults: the original gold text color (only used by the outline), no tint, ring twice as thick (Victor 2026-11-05: the original band is too thin)
 static CGImageRef g_ring, g_tip; static CGFloat g_ring_out = 1;   // 处理好的圆环 / 尖；g_ring_out = 圆环外沿半径占图半边的比例 | processed ring / tip; g_ring_out = the ring's outer edge radius as a fraction of half the image
 static int g_gen;   // 外观换了一次就加一（前端据此重设图层内容） | bumped whenever the looks change (the layers' contents are reset by it)
+static uint8_t *g_ring_px, *g_tip_px; static int g_ring_n, g_tip_n;   // 同一份图的像素（地面贴花上传用，dm_aim_art_with） | the same images' pixels (uploaded by the ground decal, dm_aim_art_with)
+static pthread_mutex_t g_art_mu = PTHREAD_MUTEX_INITIALIZER;   // 外观重读与取像素：前端主线程与画线程（贴花）都会来 | looks reload and pixel taking: both the front end's main thread and the render thread (decal) come here
 
 static CGColorRef rgba(CGFloat a) { return (CGColorRef)CFAutorelease(CGColorCreateSRGB(g_look.r, g_look.g, g_look.b, a)); }
 static void ground_ellipse(CGMutablePathRef p, CGPoint c, CGFloat k, CGFloat r) {   // 地上半径 r 格的圆 → 画面椭圆：半轴 16√2·k·r、8√2·k·r | a circle of r cells on the ground -> screen ellipse: semi-axes 16√2·k·r, 8√2·k·r
@@ -111,11 +114,18 @@ static void refresh_art(void) {
     memcpy(seen, t, sizeof t); seen_p[0] = rp; seen_p[1] = tp;
     read_look(cp);
     if (g_ring) CGImageRelease(g_ring); if (g_tip) CGImageRelease(g_tip); g_ring = g_tip = NULL; g_ring_out = 1;
+    free(g_ring_px); free(g_tip_px); g_ring_px = g_tip_px = NULL; g_ring_n = g_tip_n = 0;
     CGImageRef r = load_png(rp), tip = load_png(tp);
-    if (r) { int n = (int)MIN(512, MAX(CGImageGetWidth(r), CGImageGetHeight(r))); uint8_t *px = pixels(r, n); g_ring_out = thicken(&px, n); tint_px(px, n); g_ring = image_of(px, n); free(px); CGImageRelease(r); }
-    if (tip) { int n = (int)MIN(256, MAX(CGImageGetWidth(tip), CGImageGetHeight(tip))); uint8_t *px = pixels(tip, n); tint_px(px, n); g_tip = image_of(px, n); free(px); CGImageRelease(tip); }
+    if (r) { int n = (int)MIN(512, MAX(CGImageGetWidth(r), CGImageGetHeight(r))); uint8_t *px = pixels(r, n); g_ring_out = thicken(&px, n); tint_px(px, n); g_ring = image_of(px, n); g_ring_px = px; g_ring_n = n; CGImageRelease(r); }
+    if (tip) { int n = (int)MIN(256, MAX(CGImageGetWidth(tip), CGImageGetHeight(tip))); uint8_t *px = pixels(tip, n); tint_px(px, n); g_tip = image_of(px, n); g_tip_px = px; g_tip_n = n; CGImageRelease(tip); }
     g_gen++;
     LOG("瞄准指示：外观重载（圆环 %s、尖 %s；染色 %.2f 不透明 %.2f 粗细 %.2f 大小 %.2f）", rp ? rp.lastPathComponent.UTF8String : "描线", tp ? tp.lastPathComponent.UTF8String : "描线", g_look.tint, g_look.alpha, g_look.thick, g_look.size);
+}
+
+int dm_aim_art_with(int have, void (*fn)(const dm_aim_art *a, void *ctx), void *ctx) {
+    pthread_mutex_lock(&g_art_mu); refresh_art(); int gen = g_gen;
+    if (gen != have) { dm_aim_art a = { g_ring_px, g_tip_px, g_ring_n, g_tip_n, (float)g_ring_out, (float)g_look.alpha, (float)g_look.size }; fn(&a, ctx); }
+    pthread_mutex_unlock(&g_art_mu); return gen;
 }
 
 // 尖：一张朝上的图放到地面平面里，朝 d。图上的 x / y（格）→ 地面 x·e − y·d（e ⊥ d）→ 画面（dm_aim_cells_to_px 的线性部分）
@@ -140,7 +150,8 @@ void dm_aim_hud_draw(DmAimView *host, CGRect wr, BOOL hide) {
         for (CALayer *l in @[ring, tipi, landi]) { l.contentsGravity = kCAGravityResize; l.minificationFilter = kCAFilterTrilinear; }
         [around addSublayer:disc]; [around addSublayer:ring]; [around addSublayer:tip]; [around addSublayer:tipi]; around.mask = mask;   // 遮罩只管人物脚下那一圈，落点圈不挖 | the mask only applies to the ring under the character, not to the landing circle
         [box addSublayer:around]; [box addSublayer:land]; [box addSublayer:landi]; [host.layer addSublayer:box]; }
-    refresh_art();
+    pthread_mutex_lock(&g_art_mu); refresh_art();   // 锁到画完：画线程（贴花）重读外观会换掉 g_ring / g_tip | held until drawn: the render thread (decal) reloading the looks would swap g_ring / g_tip
+    if (kind && dm_aim_decal_live()) kind = 0;   // 地面贴花在画（Metal 后端，nvn_mtl.m）：覆盖层不画 | the ground decal is drawing (Metal backend, nvn_mtl.m): the overlay stays off
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     box.hidden = !kind;
     if (gen != g_gen) { gen = g_gen;   // 外观变了：换图、换色 | looks changed: new images, new colors
@@ -169,4 +180,5 @@ void dm_aim_hud_draw(DmAimView *host, CGRect wr, BOOL hide) {
         disc.path = dp; tip.path = tp; land.path = lp; mask.path = mp; CGPathRelease(dp); CGPathRelease(tp); CGPathRelease(lp); CGPathRelease(mp);
     }
     [CATransaction commit];
+    pthread_mutex_unlock(&g_art_mu);
 }

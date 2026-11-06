@@ -45,6 +45,13 @@ static inline int dm_aim_ignore_target(int cls, int skill, int toggle_on, int ho
 // f = the player's feet (picture-normalized 0-1, like dm_map_goal_view.sx / sy); d = unit vector in world cell directions (0 = no direction); l = the landing point's cell offset from the player. The front end converts with dm_aim_cells_to_px by its own picture height
 typedef struct { int kind; float fx, fy, dx, dy, lx, ly, lr; } dm_aim_view;
 int dm_aim_view_get(dm_aim_view *v);   // 任意线程（前端主线程）取最新一份；返回 kind | any thread (the front end's main thread) takes the latest one; returns kind
+// 地面贴花（Victor 2026-11-05：指示要贴在地上——人物、武器、佣兵挡在它前面，圈从人物身后绕过去）：Metal 后端在世界那一趟画完后按深度画进场景（gfx/nvn/nvn_mtl.m aimd_draw），
+// 与前端覆盖层（dm_aim_hud.m）同一份外观。dm_aim_art_with：外观代号与 have 不同才在锁里调 fn（贴图是预乘 RGBA8 方块），返回当前代号。dm_aim_decal_live：贴花这一路最近在画（前端覆盖层就不画）
+// Ground decal (Victor 2026-11-05: the indicator should lie on the ground -- character, weapon and mercenary in front of it, the ring passing behind the character): the Metal backend draws it into the scene with depth after the world pass (gfx/nvn/nvn_mtl.m aimd_draw),
+// with the same looks as the front end overlay (dm_aim_hud.m). dm_aim_art_with: calls fn under the lock only when the looks generation differs from have (textures are premultiplied RGBA8 squares), returns the current generation. dm_aim_decal_live: the decal path drew recently (the front end overlay then stays off)
+typedef struct { const uint8_t *ring, *tip; int ring_n, tip_n; float ring_out, alpha, size; } dm_aim_art;
+int dm_aim_art_with(int have, void (*fn)(const dm_aim_art *a, void *ctx), void *ctx);
+int dm_aim_decal_live(void);
 // 世界格差 (dx, dy) → 画面像素差：一格沿 x 是右 16、下 8 经典像素，沿 y 是左 16、下 8；每经典像素 k = 画面高 × 0.00206 像素（dm_world.c 点地面走同一套，实测）
 // World cell difference (dx, dy) -> picture pixel difference: one cell along x is 16 right and 8 down in classic pixels, along y 16 left and 8 down; each classic pixel is k = picture height × 0.00206 pixels (the same as dm_world.c click-to-walk, measured)
 static inline void dm_aim_cells_to_px(float dx, float dy, float H, float *px, float *py) { float k = H * 0.00206f; *px = (dx - dy) * 16 * k; *py = (dx + dy) * 8 * k; }

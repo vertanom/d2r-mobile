@@ -1948,6 +1948,7 @@ static void defer_fallback(void);
 static int g_el_w, g_el_h, g_el_draws; static char g_el_key[12];
 static int enc_label_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ENC_LABEL"); v = e && atoi(e); } return v; }
 static void ghost_flush(void);
+static void aimd_after_pass(void); static void aimd_pass_open(RPD *pd);   // 瞄准贴花（定义在镜头实验那一节之后） | aim decal (defined after the camera experiment section)
 static void rp_end(void) { if (g_enc) {
     ghost_flush();
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // 帧内序号：同一趟每帧同名，表里才能按名归并 | Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
@@ -1955,7 +1956,7 @@ static void rp_end(void) { if (g_enc) {
 #ifdef NVN_RT_RANGE_TEST
     int ranged=g_rt_range_active && !g_rt_range_pending;
 #endif
-    sd_finish(); pg_render_finish(g_enc); enc_r_end(g_enc); zskip_commit_clears(); g_enc = nil; g_rt_merged = 0; g_rt_range_active = g_rt_range_pending = 0; pg_end_render(); ts_after(); if (g_lp.count) lp_finish(); fz_end();
+    sd_finish(); pg_render_finish(g_enc); enc_r_end(g_enc); zskip_commit_clears(); g_enc = nil; g_rt_merged = 0; g_rt_range_active = g_rt_range_pending = 0; pg_end_render(); ts_after(); if (g_lp.count) lp_finish(); fz_end(); aimd_after_pass();
 #ifdef NVN_RT_RANGE_TEST
     rr_finish(ranged);
 #endif
@@ -2131,7 +2132,7 @@ static RENC rp_begin_ex(int clear_only) {
     ser_gate();
     g_enc = enc_r_begin(pd); pg_render_begin(g_enc);
     args_dirty_all();
-    g_stat_pass++;
+    g_stat_pass++; aimd_pass_open(pd);
     if (enc_label_on()) { id<MTLTexture> lt = pd.colorAttachments[0].texture ?: pd.depthAttachment.texture ?: pd.stencilAttachment.texture; g_el_w = (int)lt.width; g_el_h = (int)lt.height; g_el_draws = 0; g_el_key[0] = 0; }
     return g_enc;
 }
@@ -3100,6 +3101,148 @@ static uint64_t cam_patch(const p_bind_buf *u, void *mb, uint64_t mo) {   // 返
     if (main) cam_build(src, dst); else { xbg_cam_build10(&g_cam.st, dst); g_cam.scenes++; }
     const uint64_t g = ring_gpu + at; at += sz; unsigned k = next++ % SLOTS; seen[k].addr = u->addr; seen[k].frame = f; seen[k].gpu = g; return g;
 }
+// ---------- 手柄瞄准指示的地面贴花（Victor 2026-11-05：指示要贴在地上，人物、武器、佣兵挡在它前面）----------
+// 数据仍由宿主 hle_private_aim.c 出（dm_aim_view_get），外观与前端覆盖层同一份（dm_aim_hud.m dm_aim_art_with）。画法：世界那一趟（第一条挂着浮点颜色与深度、
+// 绑了主相机块的渲染通道，营地实测 = 色调映射前的 HDR 主通道）结束时，另开一个通道照原样读入那张颜色与深度，画几块贴地的方片：
+// 人物脚下的圆环、朝瞄准方向的尖、按住瞄时的落点圈。方片在世界里算（主相机块 +336 视图投影；人物落地点与地面高度按 xbg_cam_ground），
+// 一格 = 2 个世界单位（营地实测：格 (5114,5059) ↔ 世界 x 10229、z 10119），世界 x / z = 格 x / y。深度测试按反向 Z（近 = 1）取「不小于」、不写深度，
+// 方片抬高 0.15 免得与地面打架：人物、武器、佣兵比地面近，挡住的那部分就不画，圈自然从人物身后绕过去，尖平躺在地上。
+// 这一路在画（最近 0.3 秒走到过世界那一趟）时前端覆盖层不画（dm_aim_decal_live）。DM_AIM_DECAL=0 关掉、退回覆盖层；DM_AIM_DECAL_GAIN = 亮度倍数（见 aimd_draw）
+// ---------- Ground decal for the controller aim indicator (Victor 2026-11-05: the indicator should lie on the ground, with character, weapon and mercenary in front of it) ----------
+// The data still comes from the host's hle_private_aim.c (dm_aim_view_get), and the looks are the same as the front end overlay (dm_aim_hud.m dm_aim_art_with). Method: when the world pass ends (the first render pass with a float color
+// and a depth attachment that bound the main camera block; measured in camp = the HDR main pass before tone mapping), open another pass that loads that color and depth as they are and draw a few flat squares on the ground:
+// the ring under the character, the tip toward the aim, and the landing circle while holding to aim. The squares are computed in the world (main camera block +336 view-projection; the character's ground point and the ground height from xbg_cam_ground),
+// one cell = 2 world units (measured in camp: cell (5114,5059) <-> world x 10229, z 10119), world x / z = cell x / y. The depth test uses reversed Z (near = 1) with "not less", no depth write,
+// and the squares are raised 0.15 so they do not fight the ground: character, weapon and mercenary are nearer than the ground, so the parts they cover are not drawn, the ring passes behind the character and the tip lies flat on the ground.
+// While this path is drawing (reached the world pass within the last 0.3 seconds) the front end overlay stays off (dm_aim_decal_live). DM_AIM_DECAL=0 turns it off and falls back to the overlay; DM_AIM_DECAL_GAIN = brightness factor (see aimd_draw)
+#include "../../host/dm_aim.h"
+__attribute__((weak)) int dm_aim_view_get(dm_aim_view *v) { (void)v; return 0; }   // 宿主 hle_private_aim.c 提供强定义；图形单测不链宿主 | strong definition in the host's hle_private_aim.c; graphics unit tests do not link the host
+__attribute__((weak)) int dm_aim_art_with(int have, void (*fn)(const dm_aim_art *, void *), void *ctx) { (void)fn; (void)ctx; return have; }   // 同上（dm_aim_hud.m） | same (dm_aim_hud.m)
+static struct {
+    uint64_t open_pass, pass, done_frame;          // 刚开的通道 / 认定的世界那一趟 / 画过的帧 | the pass just opened / the pass taken as the world pass / the frame drawn
+    __strong id<MTLTexture> oc, od, c, d;          // 刚开的通道的颜色 0 与深度 / 世界那一趟的 | color 0 and depth of the pass just opened / of the world pass
+    NSUInteger ocl, ocs, odl, ods, cl, cs, dl, ds;
+    float vp[16], gx, gy, gz;                      // 视图投影（行向量：裁剪 = [x y z 1] × M）、人物落地点 | view-projection (row vectors: clip = [x y z 1] x M), the character's ground point
+    __strong id<MTLRenderPipelineState> ps; MTLPixelFormat pcf, pdf; __strong id<MTLDepthStencilState> ds_state; __strong id<MTLSamplerState> samp;
+    __strong id<MTLTexture> ring, tip, dummy; float ring_out, alpha, size; int gen;
+    __strong id<MTLBuffer> u[3]; int ui;
+#if !DM_NVN_M3
+    __strong id<MTL4ArgumentTable> vt, ft;
+#endif
+} g_ad = { .gen = -1, .ring_out = 1, .alpha = 0.85f, .size = 1 };
+static _Atomic double g_ad_live;
+int dm_aim_decal_live(void) { return CACurrentMediaTime() - atomic_load(&g_ad_live) < 0.3; }
+static int aimd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_AIM_DECAL"); v = !e || atoi(e) != 0; } return v; }
+static void aimd_pass_open(RPD *pd) {   // 每个渲染通道开编码器后：记下它的颜色 0 与深度 | after each render pass opens its encoder: note its color 0 and depth
+    if (!aimd_on()) return;
+    g_ad.open_pass = g_stat_pass; g_ad.oc = pd.colorAttachments[0].texture; g_ad.ocl = pd.colorAttachments[0].level; g_ad.ocs = pd.colorAttachments[0].slice;
+    g_ad.od = pd.depthAttachment.texture; g_ad.odl = pd.depthAttachment.level; g_ad.ods = pd.depthAttachment.slice;
+}
+static void aimd_cam(const p_bind_buf *u, void *mb, uint64_t mo) {   // 绑定常量缓冲时：本通道绑了主相机块、挂着浮点颜色与深度 → 它是世界那一趟 | at a constant buffer bind: this pass bound the main camera block and has a float color and a depth -> it is the world pass
+    if (u->size != XBG_CAM_BLOCK || g_ad.open_pass != g_stat_pass || g_ad.pass == g_stat_pass || !g_ad.oc || !g_ad.od || !pf_is_float(g_ad.oc.pixelFormat)) return;
+    const uint64_t f = atomic_load(&g_cur_frame); if (g_ad.done_frame == f) return;
+    const uint8_t *src = [(__bridge id<MTLBuffer>)mb contents]; if (!src) return; src += mo;
+    if (!xbg_cam_sig(src, u->size, u->size)) return;
+    memcpy(g_ad.vp, src + 336, sizeof g_ad.vp); xbg_cam_ground(src, &g_ad.gx, &g_ad.gy, &g_ad.gz);
+    g_ad.pass = g_stat_pass; g_ad.done_frame = f; g_ad.c = g_ad.oc; g_ad.cl = g_ad.ocl; g_ad.cs = g_ad.ocs; g_ad.d = g_ad.od; g_ad.dl = g_ad.odl; g_ad.ds = g_ad.ods;
+}
+static id<MTLTexture> aimd_tex(const uint8_t *px, int n) {
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:(NSUInteger)n height:(NSUInteger)n mipmapped:NO];
+    td.usage = MTLTextureUsageShaderRead; td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> t = [g_dev newTextureWithDescriptor:td]; if (!t) return nil;
+    [t replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)n, (NSUInteger)n) mipmapLevel:0 withBytes:px bytesPerRow:(NSUInteger)n * 4]; res_add(t); return t;
+}
+static void aimd_take_art(const dm_aim_art *a, void *ctx) {   // 外观变了（dm_aim_hud.m 锁里调）：重传圆环与尖 | looks changed (called under dm_aim_hud.m's lock): re-upload ring and tip
+    (void)ctx; if (g_ad.ring) defer_obj_release(g_ad.ring); if (g_ad.tip) defer_obj_release(g_ad.tip);
+    g_ad.ring = a->ring && a->ring_n > 0 ? aimd_tex(a->ring, a->ring_n) : nil; g_ad.tip = a->tip && a->tip_n > 0 ? aimd_tex(a->tip, a->tip_n) : nil;
+    g_ad.ring_out = a->ring_out > 0 ? a->ring_out : 1; g_ad.alpha = a->alpha; g_ad.size = a->size;
+    MLOG("瞄准贴花：外观重载（圆环 %s、尖 %s；不透明 %.2f 大小 %.2f）", g_ad.ring ? "贴图" : "描线", g_ad.tip ? "贴图" : "描线", g_ad.alpha, g_ad.size);
+}
+static int aimd_pipeline(MTLPixelFormat cf, MTLPixelFormat df) {
+    if (g_ad.ps && g_ad.pcf == cf && g_ad.pdf == df) return 1;
+    static const char *src =
+        "#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct U { float4x4 vp; float4 a[3]; float4 b[3]; float4 m; };\n"   // a = 中心 x、z、半边长、图（0 圆环 1 尖）；b = 图朝上的地面方向 x、z、高度、不透明；m = 亮度、有圆环图、有尖图 | a = center x, z, half side, image (0 ring 1 tip); b = the image's up direction on the ground x, z, height, opacity; m = brightness, ring image present, tip image present
+        "struct V { float4 p [[position]]; float2 uv; float sel; float al; };\n"
+        "vertex V vs(uint vid [[vertex_id]], uint iid [[instance_id]], constant U &u [[buffer(0)]]) {\n"
+        "  float2 c = float2((vid == 1 || vid == 4 || vid == 5) ? 1.0 : -1.0, (vid == 2 || vid == 3 || vid == 5) ? 1.0 : -1.0);\n"
+        "  float4 A = u.a[iid], B = u.b[iid]; float2 up = B.xy, rt = float2(-up.y, up.x); float2 w = A.xy + (c.x * rt + c.y * up) * A.z;\n"
+        "  V o; o.p = u.vp * float4(w.x, B.z, w.y, 1.0); o.uv = float2(c.x * 0.5 + 0.5, 0.5 - c.y * 0.5); o.sel = A.w; o.al = B.w; return o; }\n"   // 内存里是行向量矩阵 M 的行 = Metal 的列：u.vp * v = v × M | in memory the rows of the row-vector matrix M = Metal's columns: u.vp * v = v x M
+        "fragment float4 fs(V in [[stage_in]], texture2d<float> ring [[texture(0)]], texture2d<float> tip [[texture(1)]], sampler s [[sampler(0)]], constant U &u [[buffer(0)]]) {\n"
+        "  float4 t; float2 q = float2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);\n"
+        "  if (in.sel < 0.5) { if (u.m.y > 0.5) t = ring.sample(s, in.uv); else { float r = length(q); t = float4(0.78, 0.70, 0.47, 1.0) * (smoothstep(0.80, 0.84, r) * (1.0 - smoothstep(0.96, 1.0, r))); } }\n"   // 没有图：金色细圈（同覆盖层的描线） | no image: a thin gold ring (like the overlay's outline)
+        "  else { if (u.m.z > 0.5) t = tip.sample(s, in.uv); else t = float4(0.78, 0.70, 0.47, 1.0) * ((q.y >= -0.6 && abs(q.x) <= 0.7 * (1.0 - q.y) / 1.6) ? 1.0 : 0.0); }\n"
+        "  return t * in.al * float4(u.m.xxx, 1.0); }\n";   // 预乘：颜色乘亮度，透明度不乘 | premultiplied: color times brightness, alpha unchanged
+    NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src) options:nil error:&e];
+    if (!lib) { MLOG("【红】瞄准贴花：着色器编译失败：%s", e.localizedDescription.UTF8String); return 0; }
+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
+    MTLRenderPipelineColorAttachmentDescriptor *ca = pd.colorAttachments[0]; ca.pixelFormat = cf; ca.blendingEnabled = YES;
+    ca.sourceRGBBlendFactor = ca.sourceAlphaBlendFactor = MTLBlendFactorOne; ca.destinationRGBBlendFactor = ca.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    pd.depthAttachmentPixelFormat = df; if (df == MTLPixelFormatDepth32Float_Stencil8) pd.stencilAttachmentPixelFormat = df;
+    g_ad.ps = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+    if (!g_ad.ps) { MLOG("【红】瞄准贴花：管线失败：%s", e.localizedDescription.UTF8String); return 0; }
+    g_ad.pcf = cf; g_ad.pdf = df;
+    if (!g_ad.ds_state) { MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionGreaterEqual; dd.depthWriteEnabled = NO; g_ad.ds_state = [g_dev newDepthStencilStateWithDescriptor:dd]; }
+    if (!g_ad.samp) { MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToZero; sd.supportArgumentBuffers = YES; g_ad.samp = [g_dev newSamplerStateWithDescriptor:sd]; }
+    if (!g_ad.dummy) { static const uint8_t z[4]; g_ad.dummy = aimd_tex(z, 1); }
+    for (int i = 0; i < 3; i++) if (!g_ad.u[i]) { g_ad.u[i] = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; res_add(g_ad.u[i]); }
+#if !DM_NVN_M3
+    if (!g_ad.vt) { NSError *ae = nil; MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; g_ad.vt = [g_dev newArgumentTableWithDescriptor:ad error:&ae];
+        ad.maxTextureBindCount = 2; ad.maxSamplerStateBindCount = 1; g_ad.ft = [g_dev newArgumentTableWithDescriptor:ad error:&ae];
+        if (!g_ad.vt || !g_ad.ft) { MLOG("【红】瞄准贴花：argument table 失败：%s", ae.localizedDescription.UTF8String); g_ad.ps = nil; return 0; } }
+#endif
+    MLOG("瞄准贴花：管线就绪（颜色格式 %lu、深度格式 %lu）", (unsigned long)cf, (unsigned long)df); return 1;
+}
+static void aimd_draw(void) {
+    dm_aim_view v; int kind = dm_aim_view_get(&v);
+    atomic_store(&g_ad_live, CACurrentMediaTime());
+    g_ad.gen = dm_aim_art_with(g_ad.gen, aimd_take_art, NULL);
+    if (!kind || !g_ad.c || !g_ad.d || !aimd_pipeline(g_ad.c.pixelFormat, g_ad.d.pixelFormat)) return;
+    // 亮度：贴图颜色乘 gain / k 写进 HDR。k = 3D 画面加亮（dm_bright_k，色调映射前整体乘的曝光）：除掉它，暗处亮处贴花看起来一样亮；
+    // gain 1.5 时营地（k 2.5）的金色描线 (199,179,120) 上屏约原色（实测 gain/k = 1 时 (226,217,178)，偏亮）
+    // Brightness: the texture color times gain / k is written into the HDR. k = the 3D picture brightening (dm_bright_k, the exposure multiplied in before tone mapping): dividing it out makes the decal look equally bright in dark and bright areas;
+    // with gain 1.5 the gold outline (199,179,120) shows on screen at about its own color in camp (k 2.5) (measured with gain/k = 1: (226,217,178), too bright)
+    float dm_bright_k(void); static float gain = -1; if (gain < 0) { const char *e = getenv("DM_AIM_DECAL_GAIN"); gain = e ? (float)atof(e) : 1.5f; }
+    float kb = dm_bright_k(); if (!(kb > 0.1f)) kb = 1;
+    float *p = (float *)g_ad.u[g_ad.ui].contents; memset(p, 0, 256); memcpy(p, g_ad.vp, 64);
+    const float R = 1.4f * g_ad.size, lift = g_ad.gy + 0.15f; int n = 0;
+    float *A = p + 16, *B = p + 28, *M = p + 40;
+    #define AIMD_Q(cx, cz, half, sel, ux, uz) do { A[n * 4] = (cx); A[n * 4 + 1] = (cz); A[n * 4 + 2] = (half); A[n * 4 + 3] = (sel); B[n * 4] = (ux); B[n * 4 + 1] = (uz); B[n * 4 + 2] = lift; B[n * 4 + 3] = g_ad.alpha; n++; } while (0)
+    if (kind & 1) {
+        AIMD_Q(g_ad.gx, g_ad.gz, 2 * R / g_ad.ring_out, 0, 0, 1);
+        float dl = hypotf(v.dx, v.dy); if (dl > 1e-4f) { float ux = v.dx / dl, uz = v.dy / dl; AIMD_Q(g_ad.gx + ux * 2 * (R + 0.55f), g_ad.gz + uz * 2 * (R + 0.55f), g_ad.size, 1, ux, uz); } }
+    if (kind & 2) AIMD_Q(g_ad.gx + 2 * v.lx, g_ad.gz + 2 * v.ly, 2 * (v.lr > 0 ? v.lr : 1) / g_ad.ring_out, 0, 0, 1);
+    #undef AIMD_Q
+    M[0] = gain / kb; M[1] = g_ad.ring ? 1 : 0; M[2] = g_ad.tip ? 1 : 0;
+    if (!n) return;
+    RPD *rp = [RPD new];
+    rp.colorAttachments[0].texture = g_ad.c; rp.colorAttachments[0].level = g_ad.cl; rp.colorAttachments[0].slice = g_ad.cs;
+    rp.colorAttachments[0].loadAction = MTLLoadActionLoad; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    rp.depthAttachment.texture = g_ad.d; rp.depthAttachment.level = g_ad.dl; rp.depthAttachment.slice = g_ad.ds; rp.depthAttachment.loadAction = MTLLoadActionLoad; rp.depthAttachment.storeAction = MTLStoreActionStore;
+    if (g_ad.d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) { rp.stencilAttachment.texture = g_ad.d; rp.stencilAttachment.level = g_ad.dl; rp.stencilAttachment.slice = g_ad.ds; rp.stencilAttachment.loadAction = MTLLoadActionLoad; rp.stencilAttachment.storeAction = MTLStoreActionStore; }
+    RENC en = [g_cb renderCommandEncoderWithDescriptor:rp]; if (!en) return;
+    id<MTLTexture> rt = g_ad.ring ?: g_ad.dummy, tt = g_ad.tip ?: g_ad.dummy; id<MTLBuffer> ub = g_ad.u[g_ad.ui];
+#if DM_NVN_M3
+    [en setVertexBuffer:ub offset:0 atIndex:0]; [en setFragmentBuffer:ub offset:0 atIndex:0];
+    [en setFragmentTexture:rt atIndex:0]; [en setFragmentTexture:tt atIndex:1]; [en setFragmentSamplerState:g_ad.samp atIndex:0];
+#else
+    [en barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
+    [en setArgumentTable:g_ad.vt atStages:MTLRenderStageVertex]; [en setArgumentTable:g_ad.ft atStages:MTLRenderStageFragment];
+    [g_ad.vt setAddress:ub.gpuAddress atIndex:0]; [g_ad.ft setAddress:ub.gpuAddress atIndex:0];
+    [g_ad.ft setTexture:rt.gpuResourceID atIndex:0]; [g_ad.ft setTexture:tt.gpuResourceID atIndex:1]; [g_ad.ft setSamplerState:g_ad.samp.gpuResourceID atIndex:0];
+#endif
+    NSUInteger W = MAX((NSUInteger)1, g_ad.c.width >> g_ad.cl), H = MAX((NSUInteger)1, g_ad.c.height >> g_ad.cl);
+    [en setViewport:(MTLViewport){0, 0, W, H, 0, 1}]; [en setRenderPipelineState:g_ad.ps]; [en setDepthStencilState:g_ad.ds_state]; [en setCullMode:MTLCullModeNone];
+    [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6 instanceCount:(NSUInteger)n]; m4_end(en);
+    g_ad.ui = (g_ad.ui + 1) % 3; args_dirty_all(); g_pso_dirty = g_dss_dirty = 1;
+    { static int lg; if (lg++ < 3) { const float *m = g_ad.vp; float cx = g_ad.gx * m[0] + g_ad.gy * m[4] + g_ad.gz * m[8] + m[12], cy = g_ad.gx * m[1] + g_ad.gy * m[5] + g_ad.gz * m[9] + m[13], cw = g_ad.gx * m[3] + g_ad.gy * m[7] + g_ad.gz * m[11] + m[15];
+        MLOG("瞄准贴花：画在世界那一趟之后（%d 块；人物 %.1f,%.1f,%.1f → 画面 %.3f,%.3f；宿主脚底 %.3f,%.3f）", n, g_ad.gx, g_ad.gy, g_ad.gz, cw ? (cx / cw + 1) / 2 : -1, cw ? (1 - cy / cw) / 2 : -1, v.fx, v.fy); } }   // 核对：贴花中心投回画面应落在宿主（游戏投影）给的脚底 | check: the decal center projected to the picture should land on the feet given by the host (the game's projection)
+}
+static void aimd_after_pass(void) {   // rp_end 收尾：刚结束的是世界那一趟就画；不论是否，放掉本通道记的贴图 | at the end of rp_end: draw if the pass just ended is the world pass; either way drop the textures noted for this pass
+    if (!aimd_on()) return;
+    if (g_ad.pass && g_ad.pass == g_ad.open_pass) { g_ad.pass = 0; aimd_draw(); }
+    g_ad.oc = g_ad.od = g_ad.c = g_ad.d = nil; g_ad.open_pass = 0;
+}
 #if DM_NVN_M3
 // 旧接口的资源声明去重：同一渲染编码器内对同一资源重复 useResource 是幂等的，而每次新编参数块都会把它引用的资源全声明一遍——
 // 营地实测每次绘制声明 9.7 次、其中 9.2 次是本编码器里已经声明过的，每次约 227 条指令。这里记下本通道（g_pass.serial，与渲染编码器一一对应：
@@ -3155,6 +3298,7 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
             if (!u || !u->addr || !mtl_gpu_addr(u->addr, 1, &mb, &mo, &gpu)) { RED_ONCE(16, "阶段 %d cb%d 没有绑定 uniform 缓冲", nvn_stage, reg); continue; }
             use_rec("buf", u->addr, u->size, 0, NULL);
             if (nvn_stage == 0 && reg == 0 && g_ui_moff != 0) { uint64_t pg = ui_mat_patch(u, mb, mo); if (pg) gpu = pg; }
+            aimd_cam(u, mb, mo);   // 瞄准贴花：认世界那一趟、取主相机 | aim decal: recognise the world pass and take the main camera
             if (cam_mode() > 0 && (nvn_stage != 5 || strncmp(sh->key, CAM_CULL_CS, 16) != 0)) { uint64_t pg = cam_patch(u, mb, mo); if (pg) gpu = pg; }   // 镜头实验：主相机换成透视拷贝（任何槽位、任何阶段；按正交视锥剔除的计算着色器除外） | camera experiment: swap the main camera for the perspective copy (any slot, any stage; except the compute shader that culls against the orthographic frustum)
             if (bl) {
                 PD("B %llu st%d cb reg%d addr=%#llx size=%llu pool=%#llx+%#llx f=%g,%g,%g,%g", g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr, (unsigned long long)u->size,
