@@ -1,8 +1,8 @@
 #!/bin/bash
-# 构建、显式装机、按模式启动并拉回 Documents/<mode>.txt。用法：[DM_OUT=产物目录] [DM_NOINSTALL=1] run.sh build | run.sh install | run.sh <mode> [上限秒]
+# 构建、显式装机、按模式启动并拉回 Documents/<mode>.txt。用法：[DM_OUT=产物目录] [DM_NOINSTALL=1] run.sh build | run.sh install | run.sh keys | run.sh <mode> [上限秒]
 # 包缺省同时面向 iPhone 与 iPad；只要 iPhone：DM_DEVICE_FAMILY=1 ./run.sh build（设备族是构建设置，这里替你传给 xcodebuild）
 # 产物与日志在 $DM_ROOT/run/ios/（不进仓）。真机按 bundle 停：--terminate-existing 只停本 App。
-# Build, explicitly install, launch by mode and pull back Documents/<mode>.txt. Usage: [DM_OUT=output dir] [DM_NOINSTALL=1] run.sh build | run.sh install | run.sh <mode> [timeout seconds]
+# Build, explicitly install, launch by mode and pull back Documents/<mode>.txt. Usage: [DM_OUT=output dir] [DM_NOINSTALL=1] run.sh build | run.sh install | run.sh keys | run.sh <mode> [timeout seconds]
 # The app targets both iPhone and iPad by default; for iPhone only: DM_DEVICE_FAMILY=1 ./run.sh build (device family is a build setting; this passes it to xcodebuild for you)
 # Outputs and logs go to $DM_ROOT/run/ios/ (not in the repo). On device, stopping is by bundle: --terminate-existing stops only this App.
 set -u
@@ -142,6 +142,31 @@ if [ "$1" = build ]; then
   # DM_NOINSTALL is kept for compatibility; build now only compiles anyway and does not touch the device.
   t "构建完成"; exit 0
 fi
+# 手柄键位表 pad_remap.txt 只在 Mac App 的键位窗口里编（host/padbind_mac.m，存在 ~/Library/Application Support/D2R Mobile/）。
+# 免费账号签的两边都没有 iCloud，cloud_ios.m 那条路走不通，所以装机后经 devicectl 把 Mac 那份推进 iPhone 的 Documents（dm_custom_dir），
+# App 在下一次手柄输入时按时间戳重读（dm_gamepad.m bind_reload），不用重启。单独推：run.sh keys。推前先把 iPhone 上原有的一份拉回 $R/pad_remap.iphone.bak。
+# 只推这一个文件：不用 --remove-existing-content（会清掉整个容器）。Mac 上没有这份 = 不动 iPhone。DM_MAC_PADMAP 可换来源文件
+# The controller key table pad_remap.txt is edited only in the Mac App's key window (host/padbind_mac.m, kept in ~/Library/Application Support/D2R Mobile/).
+# Builds signed with a free account have no iCloud on either side, so the cloud_ios.m route cannot work; after installing, devicectl pushes the Mac copy into the iPhone's Documents (dm_custom_dir),
+# and the App re-reads it by timestamp on the next controller input (dm_gamepad.m bind_reload), no restart needed. Push on its own: run.sh keys. Before pushing, the iPhone's existing copy is pulled back to $R/pad_remap.iphone.bak.
+# Only this one file is pushed: never --remove-existing-content (it wipes the whole container). No copy on the Mac = the iPhone is left alone. DM_MAC_PADMAP picks another source file
+push_keys(){
+  local src=${DM_MAC_PADMAP:-$HOME/Library/Application Support/D2R Mobile/pad_remap.txt}
+  [ -f "$src" ] || { t "键位表：Mac 上没有 ${src}，iPhone 不动"; return 0; }
+  rm -f "$R/pad_remap.iphone.bak"
+  xcrun devicectl device copy from --device $D --domain-type appDataContainer --domain-identifier $B --source Documents/pad_remap.txt --destination "$R/pad_remap.iphone.bak" > /dev/null 2>&1 \
+    && t "键位表：iPhone 上原有的一份存到 $R/pad_remap.iphone.bak" || t "键位表：iPhone 上原来没有这份"
+  xcrun devicectl device copy to --device $D --domain-type appDataContainer --domain-identifier $B --source "$src" --destination Documents/pad_remap.txt > $R/keys.log 2>&1 \
+    || { t "🔴 键位表推到 iPhone 失败"; tail -5 $R/keys.log; return 1; }
+  t "键位表：Mac 的 pad_remap.txt 已推到 iPhone（$(grep -cv '^#' "$src") 行）"
+}
+if [ "$1" = keys ]; then
+  local_env_need DM_DEVICE || exit 1
+  [ "${DM_DEVBATTERY:-}" = 1 ] || DM_DEVBATTERY=0   # 同装包：只推一个文件、不跑游戏，电量闸不拦 | Like install: one file, no game run, so the battery gate does not block it
+  devlock_acquire "${SMOKE_OWNER:-${ACCEPT_OWNER:-run.sh keys}}"
+  trap devlock_release EXIT
+  push_keys; exit $?
+fi
 if [ "$1" = install ]; then
   local_env_need DM_DEVICE || exit 1
   # 装包只要二十来秒、不跑游戏：电量闸（防测试机在长时间跑局里没电）不拦装包，没配 UDID、本机缺工具、电量低都照常装；之后的真机局照旧过闸。DM_DEVBATTERY=1 时装包也过闸
@@ -150,7 +175,7 @@ if [ "$1" = install ]; then
   devlock_acquire "${SMOKE_OWNER:-${ACCEPT_OWNER:-run.sh install}}"
   trap devlock_release EXIT
   xcrun devicectl device install app --device $D "$APP" > $R/install.log 2>&1 || { t "🔴 装机失败"; tail -5 $R/install.log; exit 1; }
-  t "装机完成"; exit 0
+  t "装机完成"; push_keys; exit 0
 fi
 local_env_need DM_DEVICE || exit 1
 M=$1; CAP=${2:-60}; O=$R/out/$M.txt; rm -f $O
