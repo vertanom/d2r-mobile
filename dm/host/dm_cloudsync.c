@@ -3,7 +3,7 @@
 // 宿主单测（tests/t_cloudsync.c）用本地目录当云端。
 //
 // 同步单位：每个角色一个（存档目录下的 <名>/，里面有 <名>.d2s），共享仓库一个（名为 _stash：根目录的 SharedStash* 文件与 ModernSharedStash* 目录；
-// 角色名首字必须是字母，不会和它撞）。Settings/ 等其余东西不同步（按键、画面设置跟设备走）。
+// 角色名首字必须是字母，不会和它撞）。Settings/ 等其余东西不同步（按键、画面设置跟设备走；例外：Mac 键位窗口的手柄键位表 pad_remap.txt 由 cloud_ios.m 单向带到 iPhone，不经这里）。
 // 云端每个单位一个包 <单位>.pack：该单位全部文件打成一个文件，整个替换，不会出现新旧文件混在一起。删除标记 = 不带文件、带「已删」标志的包。
 // 时刻：单位内文件修改时间的最大值（毫秒），即游戏最后一次写它的时刻；下载时把每个文件的修改时间照包里还原，两边量出来的时刻一致。
 // 本地另记每个单位「上次同步时的内容摘要和时刻」（状态文件），据此分出本地改了 / 云端改了：只一边改了就照那边；两边都改了，时刻大的赢。
@@ -27,7 +27,7 @@
 // This only does the file comparison and moving for "local save directory ↔ one cloud directory" and does not touch the iCloud API: the iOS side (cloud_ios.m) provides the directory in the ubiquity container, confirms the packs have finished downloading, and then calls dm_cloud_sync.
 // The host unit test (tests/t_cloudsync.c) uses a local directory as the cloud.
 // Sync units: one per character (<name>/ under the save directory, containing <name>.d2s), and one for the shared stash (named _stash: the SharedStash* files and ModernSharedStash* directories in the root;
-// a character name must start with a letter, so it cannot collide with it). Everything else such as Settings/ is not synced (key bindings and display settings follow the device).
+// a character name must start with a letter, so it cannot collide with it). Everything else such as Settings/ is not synced (key bindings and display settings follow the device; exception: the controller key table pad_remap.txt from the Mac key window is carried one way to the iPhone by cloud_ios.m, not through here).
 // One pack <unit>.pack per unit in the cloud: all of the unit's files packed into one file and replaced as a whole, so old and new files never get mixed together. Deletion marker = a pack with no files and the "deleted" flag.
 // Timestamp: the maximum modification time (milliseconds) of the files in the unit, i.e. the moment the game last wrote it; on download each file's modification time is restored as in the pack, so the timestamp measured on both sides agrees.
 // Locally, "the content digest and timestamp at the last sync" is also recorded per unit (state file), which separates changed locally / changed in the cloud: if only one side changed, follow that side; if both changed, the larger timestamp wins.

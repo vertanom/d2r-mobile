@@ -43,10 +43,11 @@ static int slot_of(const void *who, int make) { int fr = -1; for (int i = 0; i <
 
 static int32_t axis(float v) { if (v > 1) v = 1; if (v < -1) v = -1; return (int32_t)lroundf(v * DM_STICK_MAX); }
 static int stick_on(int was, int32_t x, int32_t y) { double m = hypot(x, y) / DM_STICK_MAX; return was ? m >= 0.15 : m >= 0.25; }   // 迟滞：推过 25% 算推出，回到 15% 内算回中 | Hysteresis: past 25% counts as pushed out, back within 15% counts as centered
-#if TARGET_OS_OSX
-// Mac：实体键 → 游戏键的重映射表（dm_padbind.h），文件 pad_remap.txt 与 sw_custom.txt 同目录；没有文件 = 原样。
+// 实体键 → 游戏键的重映射表（dm_padbind.h），文件 pad_remap.txt 与 sw_custom.txt 同目录；没有文件 = 原样。Mac 与 iOS 都按它走；
+// 表只在 Mac 的键位窗口（host/padbind_mac.m）里编，iPhone 上这份由 iCloud 从 Mac 带过来（cloud_ios.m dm_cloud_setting_pull），键盘那栏 iOS 不用。
 // 文件改了（时间戳变）在下一次手柄输入时重读，不用重启；读不懂的文件整份不生效、沿用上一份，日志说原因。
-// Mac: physical -> game button remap table (dm_padbind.h), file pad_remap.txt next to sw_custom.txt; no file = unchanged.
+// Physical -> game button remap table (dm_padbind.h), file pad_remap.txt next to sw_custom.txt; no file = unchanged. Both the Mac and iOS follow it;
+// the table is edited only in the Mac's controller buttons window (host/padbind_mac.m), and on the iPhone this copy is brought over from the Mac by iCloud (cloud_ios.m dm_cloud_setting_pull); iOS does not use the keyboard column.
 // When the file changes (timestamp) it is re-read on the next controller input, no restart needed; a file that does not parse is ignored as a whole, the previous table stays, and the log says why.
 static dm_padbind_table g_bind; static dm_padbind_state g_bind_st; static int g_bind_init; static uint64_t g_bind_next;
 static void bind_reload(uint64_t held) {
@@ -72,8 +73,8 @@ static void pan_tick(void) {
     void dm_ui_map_pan(int dx, int dy); dm_ui_map_pan(dx * 12, dy * 12);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ pan_tick(); });
 }
-// 键位窗口（host/padbind_mac.m）点了「应用」：马上重读文件、按新表放掉按着的键，不等下一次手柄输入
-// The controller buttons window (host/padbind_mac.m) pressed Apply: re-read the file now and release held buttons by the new table, without waiting for the next controller input
+// 键位窗口（host/padbind_mac.m）点了「应用」/ iCloud 换进了新的一份（cloud_ios.m）：马上重读文件、按新表放掉按着的键，不等下一次手柄输入
+// The controller buttons window (host/padbind_mac.m) pressed Apply / iCloud swapped in a new copy (cloud_ios.m): re-read the file now and release held buttons by the new table, without waiting for the next controller input
 void dm_gamepad_remap_reload(void) { dispatch_async(dispatch_get_main_queue(), ^{ g_bind_next = 0; apply(); }); }
 // 键位窗口「设定…」：等手柄上按一颗键或一个组合，交给 cb(修饰键位, 触发键位 0–15)，不交给游戏；cb = NULL 取消。
 // 组合 = 按着修饰键再按触发键：全部松开时才定，最后按下的那颗是触发键、之前按着的是修饰键；单按一颗 = 没有修饰键。等的时候所有键都不进游戏；开始等时已经按着的键不算。只在主线程调。
@@ -81,9 +82,16 @@ void dm_gamepad_remap_reload(void) { dispatch_async(dispatch_get_main_queue(), ^
 // Combo = hold the modifiers then press the trigger: decided when everything is released, the last button pressed is the trigger and those held before it are the modifiers; a single press = no modifiers. While waiting no button reaches the game; buttons already held when waiting starts do not count. Main thread only.
 static void (^g_capture)(uint64_t mods, int bit); static uint64_t g_raw_b, g_cap_acc; static int g_cap_last;
 void dm_gamepad_capture(void (^cb)(uint64_t mods, int bit)) { g_capture = cb; g_cap_acc = 0; g_cap_last = -1; }
-// 局内没开面板才按表；菜单 / 面板里原样（储藏箱 / 编年史用 L / R / ZL / ZR 翻页签）。Mac 的 dm_front_navigation 恒为 1（app_mac.m），用触摸层自己的判断
-// The table applies only in a run with no panel open; in menus / panels everything is unchanged (the stash / Chronicle switch tabs with L / R / ZL / ZR). On the Mac dm_front_navigation is always 1 (app_mac.m), so the touch layer's own check is used
+// 局内没开面板才按表；菜单 / 面板里原样（储藏箱 / 编年史用 L / R / ZL / ZR 翻页签）。Mac 的 dm_front_navigation 恒为 1（app_mac.m），用触摸层自己的判断；
+// iOS 用 dm_front_navigation（同下面 ZR 那段判游戏态）
+// The table applies only in a run with no panel open; in menus / panels everything is unchanged (the stash / Chronicle switch tabs with L / R / ZL / ZR). On the Mac dm_front_navigation is always 1 (app_mac.m), so the touch layer's own check is used;
+// iOS uses dm_front_navigation (the same game state check as the ZR block below)
+#if TARGET_OS_OSX
 static int bind_menu(void) { int dm_touch_host_world_active(void), dm_uiscreen_panel(void); return !dm_touch_host_world_active() || dm_uiscreen_panel(); }
+#else
+static int bind_menu(void) { int dm_front_navigation(void), dm_uiscreen_panel(void); return dm_front_navigation() || dm_uiscreen_panel(); }
+#endif
+#if TARGET_OS_OSX
 // Mac 键盘（front_mac.m on_key 调，主线程）：键盘键 idx（dm_padbind_keys）按下 / 松开，按表的键盘那栏换成输出。按下那一刻定下发什么（同手柄的 latch），
 // 菜单里按缺省。宿主动作交给 apply 跟手柄的一起执行（按住型的 FREEAIM、地图平移也认键盘）。返回此刻键盘按着的全部 Switch 键
 // Mac keyboard (called by front_mac.m on_key, main thread): keyboard key idx (dm_padbind_keys) down / up, turned into its output by the table's keyboard column. What it sends is fixed the moment it goes down (like the controller's latch),
@@ -111,8 +119,7 @@ static void apply(void) {
     if (!on[0] && !on[1]) g_need_center = 0;   // 碰过屏幕后摇杆回过中了：之后再推出来算数 | The stick has returned to center since the screen was touched: pushing it out again from now on counts
     if ((b & ~prev_b) || ((on[0] || on[1]) && !g_need_center)) { dm_padmode_request_glyph(g_glyph); set_mode(1); }   // 先报键帽样式再要手柄版：同一次切换里就换成这只手柄的键帽（Mac App 上也是从键盘键帽换回手柄键帽） | Report the glyph style before asking for the controller layout, so the same switch already uses this controller's glyphs (on the Mac App this is also the switch from keyboard glyphs back to controller glyphs)
     prev_b = b;
-    if (!g_pad_mode || !on[0]) ax[0] = ax[1] = 0; if (!g_pad_mode || !on[1]) ax[2] = ax[3] = 0;
-#if TARGET_OS_OSX
+    if (!g_pad_mode || !on[0]) ax[0] = ax[1] = 0; if (!g_pad_mode || !on[1]) ax[2] = ax[3] = 0;   // 触屏模式不交摇杆；手柄模式下没推出来的给 0 | Sticks are not delivered in touch mode; in controller mode a stick that is not pushed out gives 0
     // 重映射在免费回城之前：那一段看的是游戏要收到的 ZL / ZR。菜单里新按下的键原样（翻页签）。
     // Mac 的 dm_front_navigation 恒为 1（app_mac.m），局内 / 面板用触摸层自己的判断 dm_touch_host_world_active（局内、没开面板、没暂停）
     // Remapping happens before the free town portal: that block looks at the ZL / ZR the game will receive. In menus newly pressed buttons stay unchanged (tab switching).
@@ -142,7 +149,6 @@ static void apply(void) {
         if (f_free & DM_PADACT_RELEASECAST) { void dm_aim_release_toggle(void); dm_aim_release_toggle(); } }
       if (!g_pan_running && (acts & (DM_PADACT_MAPLEFT | DM_PADACT_MAPRIGHT | DM_PADACT_MAPUP | DM_PADACT_MAPDOWN))) { g_pan_running = 1; pan_tick(); }
       if (wake >= 0) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wake + 1) * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ apply(); }); }
-#endif   // 触屏模式不交摇杆；手柄模式下没推出来的给 0 | Sticks are not delivered in touch mode; in controller mode a stick that is not pushed out gives 0
     // ZR：原版六个技能格之一。这一格空着（没绑技能）时按它 = 免费回城（手柄玩家也免费回城，与触屏回城钮一致）；绑了技能就整颗交还原版（不再整颗占用）。
     // 想把回城放在别的键上：原版选技能界面「综合技能」里有回城技能可绑（宿主进局时挂上的，dm_freetp.c），那条走原版自己的施放，不经这里。
     // 只在游戏态接管：面板开着时 ZR 照常交给原版（储藏箱 / 编年史用 ZL / ZR 翻页签）；按下时在游戏态接管的那一下，到松开前都不交给游戏

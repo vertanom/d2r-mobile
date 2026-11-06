@@ -148,7 +148,59 @@ int dm_cloud_flush_wait(double sec) {
     if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(sec * NSEC_PER_SEC)))) { LOG("【红】iCloud 同步：退出 App 前 %.0f 秒没传完（没传完的下次启动补传）", sec); return 0; }
     return 1;
 }
-void dm_cloud_foreground(void) { atomic_store(&g_bg, 0); }
+// 设置文件单向随 iCloud 走：Mac → iPhone（Victor 2026-11-05：键位只在 Mac 的窗口里编，编好的要到 iPhone 上）。现在只有 pad_remap.txt（手柄键位表，dm_padbind.h）。
+// 放在云端存档目录旁的 <云端>.settings/（不进 saves_v2：那里是 dm_cloud_sync 的包）。Mac 在键位窗口「应用」后（padbind_mac.m）与启动同步后上传本机那份；
+// iPhone 启动同步后与回前台时取：云端那份已下载到本机、且与本机不同才整份换进 dm_custom_dir()，并叫 dm_gamepad.m 马上重读；还没下载好就请系统下载、隔 3 秒再看（最多 10 次）。
+// iPhone 从不上传，云端没有就不动本机那份。没开同步（测试存档 / 没登录 iCloud / 自定义页关了，g_q 为空）两边都不做。
+// Settings files travel one way with iCloud: Mac -> iPhone (Victor 2026-11-05: the key table is edited only in the Mac window, and what is set there should reach the iPhone). Currently only pad_remap.txt (the controller key table, dm_padbind.h).
+// Kept in <cloud>.settings/ next to the cloud save directory (not in saves_v2: that holds dm_cloud_sync's packs). The Mac uploads its copy after Apply in the key window (padbind_mac.m) and after the launch sync;
+// the iPhone takes it after the launch sync and on returning to the foreground: only when the cloud copy is downloaded to this device and differs from the local one is it swapped into dm_custom_dir() whole, and dm_gamepad.m is told to re-read at once; if not downloaded yet, ask the system to download and look again 3 seconds later (at most 10 times).
+// The iPhone never uploads, and with nothing in the cloud the local copy is left alone. With sync off (test save / not signed in to iCloud / off on the Custom page, g_q is nil) neither side does anything.
+static NSString *g_set;   // 云端设置目录 | cloud settings directory
+static NSString *setting_local(NSString *nm) { const char *dm_custom_dir(void); const char *d = dm_custom_dir(); return d ? [@(d) stringByAppendingPathComponent:nm] : nil; }
+void dm_cloud_setting_push(const char *name) {
+#if TARGET_OS_OSX
+    if (!g_q || !g_set) return; NSString *nm = @(name);
+    dispatch_async(g_q, ^{
+        NSString *lp = setting_local(nm); NSData *mine = lp ? [NSData dataWithContentsOfFile:lp] : nil; if (!mine) return;
+        NSURL *cu = [NSURL fileURLWithPath:[g_set stringByAppendingPathComponent:nm]]; __block int r = 0; NSError *err = nil;
+        [[[NSFileCoordinator alloc] initWithFilePresenter:nil] coordinateWritingItemAtURL:cu options:NSFileCoordinatorWritingForReplacing error:&err byAccessor:^(NSURL *u) {
+            if ([[NSData dataWithContentsOfURL:u] isEqualToData:mine]) { r = 2; return; } r = [mine writeToURL:u atomically:YES]; }];
+        if (err || !r) LOG("【红】iCloud 设置：上传 %s 失败 %s", name, err.localizedDescription.UTF8String ?: "（写不进）");
+        else LOG("iCloud 设置：%s %s", name, r == 2 ? "云端已是同一份" : "已上传");
+    });
+#else
+    (void)name;
+#endif
+}
+#if TARGET_OS_IPHONE
+static void setting_pull(NSString *nm, int tries) {   // 在 g_q 上调 | Called on g_q
+    NSString *cp = [g_set stringByAppendingPathComponent:nm]; NSURL *cu = [NSURL fileURLWithPath:cp]; NSFileManager *fm = NSFileManager.defaultManager; NSString *st = nil;
+    int placeholder = [fm fileExistsAtPath:[g_set stringByAppendingPathComponent:[NSString stringWithFormat:@".%@.icloud", nm]]];
+    if (!placeholder && ![fm fileExistsAtPath:cp]) return;   // 云端没有：本机那份不动 | nothing in the cloud: leave the local copy alone
+    if (placeholder || ([cu getResourceValue:&st forKey:NSURLUbiquitousItemDownloadingStatusKey error:nil] && st && ![st isEqualToString:NSURLUbiquitousItemDownloadingStatusCurrent])) {
+        [fm startDownloadingUbiquitousItemAtURL:cu error:nil];
+        if (tries > 0) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), g_q, ^{ setting_pull(nm, tries - 1); });
+        else LOG("iCloud 设置：%s 还没下载到本机，下次回前台再取", nm.UTF8String);
+        return; }
+    __block NSData *d = nil; NSError *err = nil;
+    [[[NSFileCoordinator alloc] initWithFilePresenter:nil] coordinateReadingItemAtURL:cu options:0 error:&err byAccessor:^(NSURL *u) { d = [NSData dataWithContentsOfURL:u]; }];
+    NSString *lp = setting_local(nm); if (!d || !lp) { if (err) LOG("【红】iCloud 设置：读云端 %s 失败 %s", nm.UTF8String, err.localizedDescription.UTF8String); return; }
+    if ([[NSData dataWithContentsOfFile:lp] isEqualToData:d]) return;
+    if (![d writeToFile:lp atomically:YES]) { LOG("【红】iCloud 设置：%s 写不进本机", nm.UTF8String); return; }
+    LOG("iCloud 设置：从云端换进 %s（Mac 上编的那份）", nm.UTF8String);
+    if ([nm isEqualToString:@"pad_remap.txt"]) { void dm_gamepad_remap_reload(void); dm_gamepad_remap_reload(); }
+}
+#endif
+static void setting_sync(void) {   // 启动同步后 / 回前台：Mac 上传，iPhone 取 | after the launch sync / on returning to the foreground: the Mac uploads, the iPhone takes
+    if (!g_q || !g_set) return;
+#if TARGET_OS_OSX
+    dm_cloud_setting_push("pad_remap.txt");
+#else
+    dispatch_async(g_q, ^{ setting_pull(@"pad_remap.txt", 10); });
+#endif
+}
+void dm_cloud_foreground(void) { atomic_store(&g_bg, 0); setting_sync(); }
 static void cloud_ingame(int on) { if (on) atomic_store(&g_session, 1); }
 static void cloud_charsel(void) { if (atomic_exchange(&g_session, 0)) dm_cloud_flush(0); }   // 退出这一局回到前端（主菜单 / 选角页）：这一局结束 | Left this run back to the front end (main menu / character select page): this run has ended
 
@@ -313,6 +365,7 @@ void dm_cloud_boot(void) {
         NSString *nw = [docs stringByAppendingPathComponent:@"saves_v2"]; if (!v2_ready(nw, [save stringByAppendingString:@".cloudv2ok"])) return;
         g_cloud = nw; }
     [NSFileManager.defaultManager createDirectoryAtPath:g_cloud withIntermediateDirectories:YES attributes:nil error:nil];
+    g_set = [g_cloud stringByAppendingString:@".settings"]; [NSFileManager.defaultManager createDirectoryAtPath:g_set withIntermediateDirectories:YES attributes:nil error:nil];
     g_save = save; g_bak = [save stringByAppendingString:@".cloudbak"]; g_state = [save stringByAppendingString:@".cloudstate"];
     if (ldir) { g_bak = [g_cloud stringByAppendingString:@".cloudbak"]; g_state = [g_cloud stringByAppendingString:@".cloudstate"]; }   // 测试的本地云端：状态与备份跟云端目录走，不与真存档（同一路径、连真实 iCloud 时）共用——共用的话测试局会改写真存档的同步状态 | Local cloud for tests: state and backup follow the cloud directory and are not shared with the real save (same path, when connected to real iCloud) -- if shared, test runs would rewrite the real save's sync state
     g_q = dispatch_queue_create("dm.cloud", DISPATCH_QUEUE_SERIAL);
@@ -324,5 +377,6 @@ void dm_cloud_boot(void) {
     LOG("iCloud 同步：启动分段 取容器与查齐 %.0f ms、等下载 %.0f ms、文件协调与同步 %.0f ms", (t1 - t0) * 1000, (t2 - t1) * 1000, (CFAbsoluteTimeGetCurrent() - t2) * 1000);
     LOG("iCloud 同步：启动 %.0f ms，动作 %d 个%s（云端目录 %s）", (CFAbsoluteTimeGetCurrent() - t0) * 1000, n, pend ? [NSString stringWithFormat:@"，%d 个包没等到下载完、本次跳过", pend].UTF8String : "", ldir ? "本地测试目录" : sub ? sub : "saves_v2");
     g_dm_save_commit_hook = on_commit;
+    setting_sync();   // 设置文件：Mac 上传 / iPhone 取（见 dm_cloud_setting_push 上面） | settings files: the Mac uploads / the iPhone takes (see above dm_cloud_setting_push)
     { extern void (*g_dm_ingame_hook)(int); extern void (*g_dm_charsel_hook)(void); g_dm_ingame_hook = cloud_ingame; g_dm_charsel_hook = cloud_charsel; }   // 进局记一局开始；回到前端 = 这一局结束，传一次 | Entering a run marks the start of a run; returning to the front end = this run has ended, upload once
 }

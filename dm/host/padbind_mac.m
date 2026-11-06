@@ -1,10 +1,10 @@
 // Mac App「手柄 → 手柄按键…」窗口：游戏的每个动作一行（技能格、第二套技能、腰带、地图、菜单……加宿主动作：地图大小、免费回城），旁边写着现在哪些实体键 / 组合触发它；
 // 点「设定…」再在手柄上按一颗键或一个组合（按着修饰键再按触发键），它就改发这个动作（dm_gamepad_capture）。外加第二套技能的分段毫秒。
-// 「应用」把表写成 pad_remap.txt（dm_padbind_format，与 sw_custom.txt 同目录），再叫 dm_gamepad.m 马上重读：不用重启，按着的键按新表放掉。
+// 「应用」把表写成 pad_remap.txt（dm_padbind_format，与 sw_custom.txt 同目录），再叫 dm_gamepad.m 马上重读：不用重启，按着的键按新表放掉。同一份再经 iCloud 带到 iPhone（cloud_ios.m）。
 // 一颗实体键（或一个组合）只发一个动作：把它设给新动作，它就离开旧动作。文件里手写了列表里没有的输出时，多一行「自定：…」把它原样保住，不会因为开了一次窗口就被改掉。
 // Mac App "Controller -> Controller Buttons..." window: one row per game action (skill slots, 2nd skill set, belt, map, menu... plus host actions: map size, free town portal) showing which physical buttons / combos trigger it now;
 // click "Set..." then press a button or a combo on the controller (hold the modifiers, then press the trigger) and it sends this action from then on (dm_gamepad_capture). Plus the staging milliseconds for the 2nd skill set.
-// Apply writes the table as pad_remap.txt (dm_padbind_format, next to sw_custom.txt) and tells dm_gamepad.m to re-read it at once: no restart, held buttons are released by the new table.
+// Apply writes the table as pad_remap.txt (dm_padbind_format, next to sw_custom.txt) and tells dm_gamepad.m to re-read it at once: no restart, held buttons are released by the new table. The same copy is then carried to the iPhone via iCloud (cloud_ios.m).
 // A physical button (or combo) sends one action: setting it to a new action takes it off the old one. When the file holds a hand-written output that is not in the list, an extra "Custom: ..." row keeps it as is, so opening the window once never changes it.
 // 每行两栏：「手柄」与「键盘」（Victor 2026-11-05：不常用的命令放键盘，手柄只留对局要紧的）。键盘那栏点「设定…」再按一个键盘键（这个窗口自己收键，不进游戏），一个键一个动作，存成 KEY_<名>=…（dm_padbind.h）
 // Each row has two columns, "Controller" and "Keyboard" (Victor 2026-11-05: rarely needed commands go on the keyboard, the controller keeps what matters in a fight). In the keyboard column click "Set..." then press a key (this window takes the key itself, it never reaches the game); one key, one action, stored as KEY_<name>=... (dm_padbind.h)
@@ -241,6 +241,7 @@ static NSString *combo_name(uint64_t mods, int btn) {   // 「− + ✛ ↑」�
         LOG("【红】键位窗口：写 %s 失败：%s", p.UTF8String ?: "（没有目录）", e.localizedDescription.UTF8String ?: "?"); return; }
     LOG("键位窗口：应用 → %s", p.UTF8String);
     void dm_gamepad_remap_reload(void); dm_gamepad_remap_reload();
+    void dm_cloud_setting_push(const char *); dm_cloud_setting_push("pad_remap.txt");   // 同一份经 iCloud 到 iPhone（cloud_ios.m；没开同步时不做） | the same copy goes to the iPhone via iCloud (cloud_ios.m; nothing when sync is off)
     [self.window close];
 }
 @end
