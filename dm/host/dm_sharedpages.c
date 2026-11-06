@@ -1,6 +1,6 @@
 // 共享仓库页数可调（上限 99）与多出页的旁路备份。
 // 页数：原版页数 = 3 + 0x1d2ce0() + 2·(模式字节 [main+0x2127c48] == 3)，0x1d2ce0 只有这 7 个调用点（界面页码 0x394ea8 / 0x3988d8 / 0x3996d4、服务端建页表 0x55ed70 与遍历 0x55ee58、
-//   读档补空页 0x6fdf44、共享金币上限 0xc55a2c），全是这个式子。改写器把 0x1d2ce0 入口换成 svc #0x90; ret（patch_nso.py DM_SHARED_PAGES_GATE），这里答「多出几页」：
+//   读档补空页 0x6fdf44、共享金币上限 0xc55a2c），全是这个式子。改写器把 0x1d2ce0 入口换成 svc #0x91; ret（patch_nso.py DM_SHARED_PAGES_GATE），这里答「多出几页」：
 //   页数 = max(stash_pages.txt 的 shared_pages（缺省 20）, 存档里共享仓库档已有的页数)，夹在 5..99；本进程第一次问时定下、之后不变（服务端按它分配页表，局中变了会错位）。
 //   取 max：调小也不会让游戏读档时丢掉已有的页（页数少的构建读多页的档，多出的页大概率被丢弃）。
 // 备份：共享仓库档 <名>.d2i 按 55 AA 55 AA 分段，段头 +0x14 是段类型：0 = 物品页，1 / 2 = 原版别的段（实测 1 在第 5 页后、2 在最后；游戏按「前 5 页、类型 1、其余页、类型 2」写）。
@@ -9,7 +9,7 @@
 //   第 k+1 页起用备份的（那个程序看不见这些页，动不了，备份就是真值，含页上的金币），接在类型 2 段前面；改前那份留成 <名>.d2i.before-restore。
 // Adjustable shared stash page count (cap 99) and a side backup of the extra pages.
 // Count: original count = 3 + 0x1d2ce0() + 2·(mode byte [main+0x2127c48] == 3); 0x1d2ce0 has exactly these 7 call sites (UI page number 0x394ea8 / 0x3988d8 / 0x3996d4, server page table 0x55ed70 and its walk 0x55ee58,
-//   loading fills empty pages 0x6fdf44, shared gold cap 0xc55a2c), all with this expression. The rewriter replaces the entry of 0x1d2ce0 with svc #0x90; ret (patch_nso.py DM_SHARED_PAGES_GATE), and this answers 'how many extra pages':
+//   loading fills empty pages 0x6fdf44, shared gold cap 0xc55a2c), all with this expression. The rewriter replaces the entry of 0x1d2ce0 with svc #0x91; ret (patch_nso.py DM_SHARED_PAGES_GATE), and this answers 'how many extra pages':
 //   count = max(shared_pages in stash_pages.txt (default 20), pages the shared stash file in the save already has), clamped to 5..99; fixed at the first question in this process and never changed afterwards (the server allocates its page table by it; a change mid-run would misalign).
 //   Taking the max: lowering the setting never makes the game drop existing pages on load (a build with fewer pages reading a file with more most likely drops the extra pages).
 // Backup: the shared stash file <name>.d2i is split into segments by 55 AA 55 AA, segment header +0x14 is the segment type: 0 = item page, 1 / 2 = other original segments (measured: 1 after page 5, 2 last; the game writes 'first 5 pages, type 1, the other pages, type 2').
@@ -76,7 +76,7 @@ int dm_shared_pages(void) {   // 本进程的共享仓库页数（第一次调�
     int exp = 0; if (atomic_compare_exchange_strong(&g_count, &exp, c)) LOG("共享仓库：页数 %d（设定 shared_pages=%d，存档里已有 %d 页，夹在 %d–%d），本次运行不再变", c, want, have, SP_MIN, SP_MAX);
     return atomic_load(&g_count);
 }
-// svc #0x90（0x1d2ce0 入口）：答「多出几页」= 页数 − 3 − 2·(模式 == 3)，写 x0 | svc #0x90 (entry of 0x1d2ce0): answers 'how many extra pages' = count - 3 - 2·(mode == 3), written to x0
+// svc #0x91（0x1d2ce0 入口）：答「多出几页」= 页数 − 3 − 2·(模式 == 3)，写 x0 | svc #0x91 (entry of 0x1d2ce0): answers 'how many extra pages' = count - 3 - 2·(mode == 3), written to x0
 void svc_shared_pages(uint64_t *regs) {
     uint8_t *B = main_base(); int mode3 = B && B[0x2127c48] == 3;
     regs[0] = (uint64_t)(uint32_t)(dm_shared_pages() - 3 - 2 * mode3);

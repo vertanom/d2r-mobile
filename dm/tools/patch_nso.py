@@ -50,6 +50,9 @@ PATCH_OFF = (len(IMG) + 0xFFFF) & ~0xFFFF
 # Networking cuts (excluded scope: Battle.net / online play): taken from a community offline fix (LFS Mod Offline Fix for v2228224, which differs from the official 94012 main in only these 7 words).
 # Measured: the system service layer (nifm offline / DNS black hole / account service) cannot get around it: the game itself sends Battle.net requests directly and allows offline play according to the "last online" time.
 CUTS = {'db0507f36b84200ac05f75d76ed5026f': [
+    # 提示条固定只有 8 个 subText。所有原版/宿主新增条目在重排前过统一容量门；同键换字仍走原路径。
+    # The legend has eight inline subText widgets. Bound every append before reflow; same-key updates retain their original path.
+    (0xaa9f88, '9c000094', '011200d4', '提示条追加 bl 0xaaa1f8 → svc #0x90：总数最多 8 条，优先撤宿主可选提示给原版操作留位，防第 9 个内嵌文字控件越界（dm_padmode.c）', '仅宿主'),
     # （放进所有产物共用的基础改写）：游戏显存分配器预算 260 MB → 512 MB
     # (Placed in the base rewrite shared by all build outputs): game video memory allocator budget 260 MB → 512 MB
     (0x8524c4, '0808a2d2', '0800a4d2', '显存分配器初始化配置：mov x8,#0x10400000（260 MB）→ mov x8,#0x20000000（512 MB），随后 movk #0xa0,lsl48 与 str [sp,#0x238] 不变；'
@@ -190,15 +193,15 @@ cuts = list(CUTS.get(BUILD_ID, []))
 #   UI page number 0x394ec0 / 0x3988f0 / 0x3996ec, server page table 0x55ed88 (allocated by N) and its walk 0x55ee6c, loading fills empty pages 0x6fdf60 / 0x6fdf8c, shared gold cap 0xc55a44 (2.5 million × N).
 #   #3 becomes #(3 + pages − 5), all 8 together (changing only some would make UI, server and loading disagree on the count). Only main matches these bytes; other modules are untouched.
 #   Caution: the extra pages are stored in the shared stash file .d2i; opening the same file with a build that has fewer pages most likely drops the extra pages - both devices need the same count. Default 20: rebuilding without the variable still cannot produce a build that drops pages.
-# 页数门（DM_SHARED_PAGES_GATE，这条分支缺省开）：不改 8 条 add，而把 0x1d2ce0 入口换成 svc #0x90; ret，由宿主答「多出几页」（dm_sharedpages.c：stash_pages.txt 的 shared_pages 与存档已有页数取大、5..99，
+# 页数门（DM_SHARED_PAGES_GATE，这条分支缺省开）：不改 8 条 add，而把 0x1d2ce0 入口换成 svc #0x91; ret，由宿主答「多出几页」（dm_sharedpages.c：stash_pages.txt 的 shared_pages 与存档已有页数取大、5..99，
 #   每次运行定一次）。开着门时 DM_SHARED_PAGES 不用。7 个调用点都只拿它的返回值算页数，换掉整个函数（原版的返回值 = 0）不影响别处
-# Page count gate (DM_SHARED_PAGES_GATE, on by default on this branch): instead of the 8 adds, the entry of 0x1d2ce0 becomes svc #0x90; ret and the host answers 'how many extra pages' (dm_sharedpages.c: the larger of shared_pages in stash_pages.txt
+# Page count gate (DM_SHARED_PAGES_GATE, on by default on this branch): instead of the 8 adds, the entry of 0x1d2ce0 becomes svc #0x91; ret and the host answers 'how many extra pages' (dm_sharedpages.c: the larger of shared_pages in stash_pages.txt
 #   and the pages the save already has, 5..99, decided once per run). With the gate on, DM_SHARED_PAGES is not used. All 7 call sites only use its return value to compute the count, so replacing the whole function (the original returns 0) affects nothing else
 SHARED_PAGES_GATE = os.environ.get('DM_SHARED_PAGES_GATE', '1') != '0'
 SHARED_PAGES = 5 if SHARED_PAGES_GATE else int(os.environ.get('DM_SHARED_PAGES', '20'))
 SHARED_PAGE_ADDS = (0x394ec0, 0x3988f0, 0x3996ec, 0x55ed88, 0x55ee6c, 0x6fdf60, 0x6fdf8c, 0xc55a44)
 if SHARED_PAGES_GATE and struct.unpack_from('<I', IMG, SHARED_PAGE_ADDS[0])[0] == 0x11000D00:
-    cuts.append((0x1d2ce0, 'ffc300d1f44f01a9', '011200d4c0035fd6', '共享仓库多出几页 0x1d2ce0 入口 → svc #0x90; ret：宿主按 stash_pages.txt 的 shared_pages 答（hle.h SVC_HOST_SHARED_PAGES，dm_sharedpages.c）', '仅宿主'))
+    cuts.append((0x1d2ce0, 'ffc300d1f44f01a9', '211200d4c0035fd6', '共享仓库多出几页 0x1d2ce0 入口 → svc #0x91; ret：宿主按 stash_pages.txt 的 shared_pages 答（hle.h SVC_HOST_SHARED_PAGES，dm_sharedpages.c）', '仅宿主'))
 if SHARED_PAGES != 5 and struct.unpack_from('<I', IMG, SHARED_PAGE_ADDS[0])[0] == 0x11000D00:   # 只有 main 的这个地址是 add w0,w8,#3 | only main has add w0,w8,#3 here
     assert all(struct.unpack_from('<I', IMG, a)[0] & 0x5FFFFC00 == 0x11000C00 for a in SHARED_PAGE_ADDS), '共享仓库页数：8 处不全是 add/adds #3'   # 0x5F…：add 与 adds（位 29）都认 | 0x5F...: matches both add and adds (bit 29)
     assert 5 <= SHARED_PAGES <= 60, f'DM_SHARED_PAGES 超出范围：{SHARED_PAGES}'
