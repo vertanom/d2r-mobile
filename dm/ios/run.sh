@@ -142,27 +142,33 @@ if [ "$1" = build ]; then
   # DM_NOINSTALL is kept for compatibility; build now only compiles anyway and does not touch the device.
   t "构建完成"; exit 0
 fi
-# 手柄键位表 pad_remap.txt 只在 Mac App 的键位窗口里编（host/padbind_mac.m，存在 ~/Library/Application Support/D2R Mobile/）。
-# 免费账号签的两边都没有 iCloud，cloud_ios.m 那条路走不通，所以装机后经 devicectl 把 Mac 那份推进 iPhone 的 Documents（dm_custom_dir），
-# App 在下一次手柄输入时按时间戳重读（dm_gamepad.m bind_reload），不用重启。单独推：run.sh keys。推前先把 iPhone 上原有的一份拉回 $R/pad_remap.iphone.bak。
-# 只推这一个文件：不用 --remove-existing-content（会清掉整个容器）。Mac 上没有这份 = 不动 iPhone。DM_MAC_PADMAP 可换来源文件
-# The controller key table pad_remap.txt is edited only in the Mac App's key window (host/padbind_mac.m, kept in ~/Library/Application Support/D2R Mobile/).
-# Builds signed with a free account have no iCloud on either side, so the cloud_ios.m route cannot work; after installing, devicectl pushes the Mac copy into the iPhone's Documents (dm_custom_dir),
-# and the App re-reads it by timestamp on the next controller input (dm_gamepad.m bind_reload), no restart needed. Push on its own: run.sh keys. Before pushing, the iPhone's existing copy is pulled back to $R/pad_remap.iphone.bak.
-# Only this one file is pushed: never --remove-existing-content (it wipes the whole container). No copy on the Mac = the iPhone is left alone. DM_MAC_PADMAP picks another source file
+# Mac App 窗口里编的设置只在 Mac 上写（自定义目录 ~/Library/Application Support/D2R Mobile/）：手柄键位表 pad_remap.txt（host/padbind_mac.m）、
+# 瞄准指示的颜色 / 不透明度 / 粗细 / 大小 aim_hud.txt（host/aimhud_mac.m），以及玩家自己放进去的圆环图 aim_ring.png / aim_tip.png。
+# 免费账号签的两边都没有 iCloud，cloud_ios.m 那条路走不通，所以装机后经 devicectl 把 Mac 上有的几份推进 iPhone 的 Documents（dm_custom_dir），
+# App 按修改时间自己重读（dm_gamepad.m bind_reload 下一次手柄输入时；dm_aim_hud.m 每半秒），不用重启。单独推：run.sh keys。每份推前先把 iPhone 上原有的拉回 $R/<名>.iphone.bak。
+# 一份一份推：不用 --remove-existing-content（会清掉整个容器）。Mac 上没有的那份 = iPhone 上的不动。DM_MAC_CUSTOM 可换来源目录
+# Settings edited in the Mac App's windows are written only on the Mac (custom directory ~/Library/Application Support/D2R Mobile/): the controller key table pad_remap.txt (host/padbind_mac.m),
+# the aim indicator's color / opacity / thickness / size aim_hud.txt (host/aimhud_mac.m), and the ring images aim_ring.png / aim_tip.png a player puts there.
+# Builds signed with a free account have no iCloud on either side, so the cloud_ios.m route cannot work; after installing, devicectl pushes the ones the Mac has into the iPhone's Documents (dm_custom_dir),
+# and the App re-reads them by modification time (dm_gamepad.m bind_reload on the next controller input; dm_aim_hud.m every half second), no restart needed. Push on its own: run.sh keys. Before each push the iPhone's existing copy is pulled back to $R/<name>.iphone.bak.
+# One file at a time: never --remove-existing-content (it wipes the whole container). A file the Mac does not have = the iPhone's copy is left alone. DM_MAC_CUSTOM picks another source directory
 push_keys(){
-  local src=${DM_MAC_PADMAP:-$HOME/Library/Application Support/D2R Mobile/pad_remap.txt}
-  [ -f "$src" ] || { t "键位表：Mac 上没有 ${src}，iPhone 不动"; return 0; }
-  rm -f "$R/pad_remap.iphone.bak"
-  xcrun devicectl device copy from --device $D --domain-type appDataContainer --domain-identifier $B --source Documents/pad_remap.txt --destination "$R/pad_remap.iphone.bak" > /dev/null 2>&1 \
-    && t "键位表：iPhone 上原有的一份存到 $R/pad_remap.iphone.bak" || t "键位表：iPhone 上原来没有这份"
-  xcrun devicectl device copy to --device $D --domain-type appDataContainer --domain-identifier $B --source "$src" --destination Documents/pad_remap.txt > $R/keys.log 2>&1 \
-    || { t "🔴 键位表推到 iPhone 失败"; tail -5 $R/keys.log; return 1; }
-  t "键位表：Mac 的 pad_remap.txt 已推到 iPhone（$(grep -cv '^#' "$src") 行）"
+  local dir=${DM_MAC_CUSTOM:-$HOME/Library/Application Support/D2R Mobile} f n=0 rc=0
+  for f in pad_remap.txt aim_hud.txt aim_ring.png aim_tip.png; do
+    [ -f "$dir/$f" ] || continue
+    rm -f "$R/$f.iphone.bak"
+    xcrun devicectl device copy from --device $D --domain-type appDataContainer --domain-identifier $B --source Documents/$f --destination "$R/$f.iphone.bak" > /dev/null 2>&1 \
+      && t "设置：iPhone 上原有的 $f 存到 $R/$f.iphone.bak" || t "设置：iPhone 上原来没有 $f"
+    xcrun devicectl device copy to --device $D --domain-type appDataContainer --domain-identifier $B --source "$dir/$f" --destination Documents/$f > $R/keys.log 2>&1 \
+      || { t "🔴 $f 推到 iPhone 失败"; tail -5 $R/keys.log; rc=1; continue; }
+    t "设置：Mac 的 $f 已推到 iPhone"; n=$((n + 1))
+  done
+  [ $n -gt 0 ] || [ $rc -ne 0 ] || t "设置：Mac 上 ${dir} 里一份都没有，iPhone 不动"
+  return $rc
 }
 if [ "$1" = keys ]; then
   local_env_need DM_DEVICE || exit 1
-  [ "${DM_DEVBATTERY:-}" = 1 ] || DM_DEVBATTERY=0   # 同装包：只推一个文件、不跑游戏，电量闸不拦 | Like install: one file, no game run, so the battery gate does not block it
+  [ "${DM_DEVBATTERY:-}" = 1 ] || DM_DEVBATTERY=0   # 同装包：只推几个设置文件、不跑游戏，电量闸不拦 | Like install: a few settings files, no game run, so the battery gate does not block it
   devlock_acquire "${SMOKE_OWNER:-${ACCEPT_OWNER:-run.sh keys}}"
   trap devlock_release EXIT
   push_keys; exit $?
