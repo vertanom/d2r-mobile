@@ -110,7 +110,7 @@ if [ -z "$LINK" ] && [ -n "$(find "$RES" -type l -print -quit)" ]; then
 fi
 [ -s "$RES/paths.txt" ] || rm -f "$RES/paths.txt"
 VER=${DM_MAC_VERSION:-1.0}; BUILD=${DM_MAC_BUILD:-$(date +%m%d%H%M)}
-echo "版本 ${VER} 构建 ${BUILD} 产物 $(basename "$P") 提交 $(git -C "$DM" rev-parse --short HEAD 2>/dev/null || echo 未知)" > "$RES/build.txt"
+echo "版本 ${VER} 构建 ${BUILD} 产物 $(basename "$P") 提交 $(git -C "$DM" rev-parse --short HEAD 2>/dev/null || echo 未知)$([ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2>/dev/null)" ] || echo -dirty)" > "$RES/build.txt"   # -dirty = 构建时工作树有没提交的改动 | -dirty = the working tree had uncommitted changes at build time
 cat > "$APP/Contents/Info.plist" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
