@@ -32,7 +32,7 @@
 
 enum { DM_PADBIND_N = 16, DM_PADBIND_COMBOS = 32, DM_PADBIND_TAP_MS = 80, DM_PADBIND_CHORD_MS = 120 };   // 实体键 = 原版键位位 0–15（A B X Y LS RS L R ZL ZR + − ← ↑ → ↓）；组合最多 32 条；修饰键单按补发的毫秒；修饰键等组合的毫秒 | Physical buttons = original button bits 0-15; at most 32 combos; milliseconds a lone modifier tap is sent; milliseconds a modifier waits for a combo
 // 宿主动作：输出的位 48 起（实体手柄只有 0–15，前端自用位不进表的输出） | Host actions: output bits from 48 (the physical controller only has 0-15; the front end's own bits never appear in table outputs)
-enum { DM_PADBIND_ACT0 = 48, DM_PADBIND_NACT = 13 };
+enum { DM_PADBIND_ACT0 = 48, DM_PADBIND_NACT = 14 };
 #define DM_PADACT_MAPSIZE (1ull << 48)      // 地图：全屏 ↔ 小地图（dm_ui_map_full） | map: fullscreen <-> minimap (dm_ui_map_full)
 #define DM_PADACT_TOWNPORTAL (1ull << 49)   // 免费回城（dm_tp_request） | free town portal (dm_tp_request)
 #define DM_PADACT_MAPPOS (1ull << 50)       // 小地图放左 ↔ 放右（dm_ui_map_pos_toggle） | minimap left <-> right (dm_ui_map_pos_toggle)
@@ -46,6 +46,7 @@ enum { DM_PADBIND_ACT0 = 48, DM_PADBIND_NACT = 13 };
 #define DM_PADACT_FREEAIM (1ull << 58)      // 按住 = 自由瞄准（PC 的 Shift：表里的技能不选怪，朝左摇杆方向放，hle_private_aim.c） | held = free aim (the PC's Shift: listed skills pick no monster and go the left stick's way, hle_private_aim.c)
 #define DM_PADACT_FREEAIMTOGGLE (1ull << 59)   // 自由瞄准开 ↔ 关 | free aim on <-> off
 #define DM_PADACT_RELEASECAST (1ull << 60)   // 松开才放开 ↔ 关（位移 / 落点类按住瞄、松开放，hle_private_aim.c） | cast on release on <-> off (movement / ground zone: hold to aim, release to cast, hle_private_aim.c)
+#define DM_PADACT_WEAPONSWAP (1ull << 61)   // 换武器 I ↔ II（dm_weaponswap_request，dm_actions.c 调游戏自己的换武器函数） | weapon swap I <-> II (dm_weaponswap_request, dm_actions.c calls the game's own weapon swap function)
 #define DM_PADACT_ALL (((1ull << DM_PADBIND_NACT) - 1) << DM_PADBIND_ACT0)
 typedef struct { uint64_t mods; int btn; uint64_t out; } dm_padbind_combo;   // 按着 mods 的全部再按 btn → out | holding all of mods and pressing btn -> out
 // 键盘键：名字（KEY_ 之后那段）与 Mac 虚拟键码。只许往后加（文件里按名字存，不按序号） | Keyboard keys: name (the part after KEY_) and Mac virtual key code. Append only (files store names, not indices)
@@ -76,7 +77,7 @@ typedef struct { uint64_t out[DM_PADBIND_N]; int stage_ms; int ncombo; dm_padbin
 typedef struct { uint64_t held, ignore, latch[DM_PADBIND_N], t_down[DM_PADBIND_N], t_up[DM_PADBIND_N], tail, pend, used, tap, fired, acts; } dm_padbind_state;
 
 static const char *const dm_padbind_names[DM_PADBIND_N] = { "A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN" };
-static const char *const dm_padbind_act_names[DM_PADBIND_NACT] = { "MAPSIZE", "TOWNPORTAL", "MAPPOS", "MAPZOOMIN", "MAPZOOMOUT", "MAPLEFT", "MAPRIGHT", "MAPUP", "MAPDOWN", "MAPCENTER", "FREEAIM", "FREEAIMTOGGLE", "RELEASECAST" };
+static const char *const dm_padbind_act_names[DM_PADBIND_NACT] = { "MAPSIZE", "TOWNPORTAL", "MAPPOS", "MAPZOOMIN", "MAPZOOMOUT", "MAPLEFT", "MAPRIGHT", "MAPUP", "MAPDOWN", "MAPCENTER", "FREEAIM", "FREEAIMTOGGLE", "RELEASECAST", "WEAPONSWAP" };
 
 static inline void dm_padbind_identity(dm_padbind_table *t) { memset(t, 0, sizeof *t); for (int i = 0; i < DM_PADBIND_N; i++) t->out[i] = 1ull << i; for (int i = 0; i < DM_PADBIND_NKEY; i++) t->kout[i] = dm_padbind_key_def(i); }
 static inline int dm_padbind_is_identity(const dm_padbind_table *t) { for (int i = 0; i < DM_PADBIND_N; i++) if (t->out[i] != 1ull << i) return 0; return !t->ncombo; }   // 只看手柄（键盘那栏不影响手柄这层） | controller only (the keyboard column does not affect this layer)

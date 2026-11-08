@@ -48,6 +48,7 @@ static NSString *func_name(uint64_t m) {
     if (m == DM_PADACT_FREEAIM) return T("dmPadFnFreeAim");
     if (m == DM_PADACT_FREEAIMTOGGLE) return T("dmPadFnFreeAimToggle");
     if (m == DM_PADACT_RELEASECAST) return T("dmPadFnReleaseCast");
+    if (m == DM_PADACT_WEAPONSWAP) return T("dmPadFnWeaponSwap");
     for (unsigned k = 0; k < sizeof k_slots / sizeof *k_slots; k++) { uint64_t s = 1ull << k_slots[k];
         if (m == s) return fill1("dmPadFnSkill", @(k_name[k_slots[k]]));
         if (m == (DM_BTN_ZL | s)) return fill1("dmPadSet2", @(k_name[k_slots[k]])); }
@@ -198,7 +199,7 @@ static NSString *combo_name(uint64_t mods, int btn) {   // 「− + ✛ ↑」�
     for (int k = 0; k < 4; k++) [self addRow:1ull << k_belt[k]];
     [self addRow:DM_BTN_MINUS]; [self addRow:DM_PADACT_MAPSIZE]; [self addRow:DM_PADACT_MAPPOS]; [self addRow:DM_PADACT_MAPZOOMIN]; [self addRow:DM_PADACT_MAPZOOMOUT];
     [self addRow:DM_PADACT_MAPLEFT]; [self addRow:DM_PADACT_MAPRIGHT]; [self addRow:DM_PADACT_MAPUP]; [self addRow:DM_PADACT_MAPDOWN]; [self addRow:DM_PADACT_MAPCENTER];
-    [self addRow:DM_PADACT_TOWNPORTAL]; [self addRow:DM_PADACT_FREEAIM]; [self addRow:DM_PADACT_FREEAIMTOGGLE]; [self addRow:DM_PADACT_RELEASECAST]; [self addRow:DM_BTN_PLUS];
+    [self addRow:DM_PADACT_TOWNPORTAL]; [self addRow:DM_PADACT_FREEAIM]; [self addRow:DM_PADACT_FREEAIMTOGGLE]; [self addRow:DM_PADACT_RELEASECAST]; [self addRow:DM_PADACT_WEAPONSWAP]; [self addRow:DM_BTN_PLUS];
     for (int b = 0; b < DM_PADBIND_N; b++) if (![self.funcs containsObject:@(1ull << b)]) [self addRow:1ull << b];
     self.unused = [NSTextField wrappingLabelWithString:@""]; self.unused.textColor = NSColor.secondaryLabelColor; self.unused.preferredMaxLayoutWidth = 1340;
     self.note = [NSTextField wrappingLabelWithString:@""]; self.note.textColor = NSColor.secondaryLabelColor; self.note.preferredMaxLayoutWidth = 1340; self.note.hidden = YES;

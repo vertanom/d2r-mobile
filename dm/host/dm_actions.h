@@ -67,6 +67,7 @@ int dm_held_stow_result(void);               // 最近一次 dm_held_stow 的结
 void dm_item_identify_free(uint32_t item_id);   // 免费鉴定这件（未鉴定物品双击）：服务端拍里调原版鉴定函数 main+0x78acf0，不消耗卷轴 / 书 | identify this item for free (double-tap on an unidentified item): calls the original game's identify function main+0x78acf0 in the server tick, without consuming a scroll / tome
 // 副手组技能一键放（dm_actions.c 那一节）
 // One-press casting of off-hand set skills (that section of dm_actions.c)
+void dm_weaponswap_request(void);                 // 键位表宿主动作 WEAPONSWAP：换武器 I ↔ II（任意线程） | key table host action WEAPONSWAP: weapon swap I <-> II (any thread)
 uint64_t dm_swapskill_filter(uint64_t buttons);   // 取手柄状态处（hle_hid.c）：压住 / 放行要先换武器的那个键 | where the controller state is fetched (hle_hid.c): hold back / let through the button that needs a weapon swap first
 void dm_swapskill_srv_wset(int w);                // 服务端拍（diag.c hud_tick）发布当前武器组 0 / 1 | the server tick (diag.c hud_tick) publishes the current weapon set 0 / 1
 int dm_swapskill_slot(int slot, int *charges);    // 技能钮显示：1 = 技能在另一组（「II」角标），2 = 充能技能（*charges = 剩余次数） | skill button display: 1 = the skill is in the other set ("II" badge), 2 = charged skill (*charges = remaining charges)

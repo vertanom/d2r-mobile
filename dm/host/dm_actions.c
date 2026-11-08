@@ -360,6 +360,12 @@ static _Atomic uint64_t g_ss_map[6];       // 6 个面：手柄位 | 普通格 <
 static _Atomic uint32_t g_ss_equipped[16]; static _Atomic int g_ss_neq;   // 身上穿着的物品 id（两组都算） | Ids of the items being worn (both sets counted)
 void dm_swapskill_srv_wset(int w) { atomic_store(&g_ss_srv_wset, w); }
 int dm_swapskill_wset(void) { return atomic_load(&g_ss_srv_wset); }
+// 键位表的宿主动作 WEAPONSWAP（dm_gamepad.m）：任意线程记一笔，下面连招那一拍执行；人物在动作中 / 连招或增益自动补的换武器在进行先等着，最多 50 拍（约 2 秒）还换不了就作废。
+//   换过之后等服务端报的组号变了（最多 25 拍）才换下一下：组号没变就再调，包尾带的是旧组号，服务端会拒
+// The key table host action WEAPONSWAP (dm_gamepad.m): any thread records a request, carried out on the combo tick below; while the character is in an action / a combo or a buff auto-recast swap is in progress it waits, at most 50 ticks (about 2 seconds), then is dropped.
+//   After a swap the next one waits until the set number reported by the server changes (at most 25 ticks): calling again before that would carry the old set number at the end of the packet, and the server rejects it
+static _Atomic int g_ws_req;
+void dm_weaponswap_request(void) { atomic_store(&g_ws_req, 1); }
 int dm_swapskill_busy(void) { return atomic_load(&g_ss_phase) != SS_IDLE; }   // 副手组技能的连招在进行（增益自动补 dm_autobuff.c 这时不自己换武器） | an off-hand-set skill combo is in progress (buff auto-recast dm_autobuff.c does not swap weapons itself meanwhile)
 static _Atomic uint32_t g_ss_itemsig; uint32_t dm_swapskill_itemsig(void) { return atomic_load(&g_ss_itemsig); }   // 客户端技能链表里物品给的技能（技能号、物品 id）的指纹 | Fingerprint of the item-granted skills (skill id, item id) in the client skill linked list
 int dm_swapskill_slot(int slot, int *charges) {   // 1 = 技能在另一组（画「II」），2 = 充能技能（画次数），4 = 当前组也有同号技能（按下用当前组那个，不换武器）；可叠加 | 1 = the skill is in the other set (draw "II"), 2 = charged skill (draw the count), 4 = the current set also has a skill with the same id (a press uses the one in the current set, no weapon swap); can be combined
@@ -443,6 +449,11 @@ static void swapskill_pump(uint8_t *b, uint64_t pl) {
     { static int tree_from = -1; int dm_ui_swaptab_take(void), dm_ui_skilltree_open(void);
       if (dm_ui_swaptab_take()) { if (ph == SS_IDLE && w >= 0 && !busy && !dead) { if (tree_from < 0) tree_from = w; swap0(w); LOG("副手组技能：拍 %u 技能树里点 I / II 页签 → 换武器（当前组 %d）", t, w); } else LOG("副手组技能：技能树页签这一下没换（%s）", ph != SS_IDLE ? "连招进行中" : busy ? "动作中" : "读不到当前武器组"); }
       if (tree_from >= 0 && !dm_ui_skilltree_open() && ph == SS_IDLE) { if (w >= 0 && w != tree_from) { from = tree_from; tback = t; tries = 1; swap0(w); atomic_store(&g_ss_phase, SS_BACK); LOG("副手组技能：拍 %u 关技能树 → 切回打开时的第 %d 组", t, from); } tree_from = -1; } }
+    { static uint32_t ws_t0, ws_sent; static int ws_wait, ws_from = -1; int dm_autobuff_busy(void), ab = dm_autobuff_busy(), idle = atomic_load(&g_ss_phase) == SS_IDLE;   // 相位重读：上面技能树页签那段这一拍可能刚换过 | phase read again: the skill tree tab block above may have just swapped on this tick
+      if (ws_from >= 0 && (w != ws_from || t - ws_sent > 25)) ws_from = -1;
+      if (atomic_exchange(&g_ws_req, 0)) { if (ws_wait) LOG("换武器：拍 %u 又按了一下，前一下还没换，并成一下", t); ws_wait = 1; ws_t0 = t; }
+      if (ws_wait) { if (idle && !ab && ws_from < 0 && w >= 0 && !busy && !dead) { swap0(w); ws_wait = 0; ws_from = w; ws_sent = t; LOG("换武器：拍 %u 键位动作 WEAPONSWAP → 换武器（当前组 %d，等了 %u 拍）", t, w, t - ws_t0); }
+          else if (t - ws_t0 > 50) { ws_wait = 0; LOG("换武器：键位动作 WEAPONSWAP 作废（%s）", dead ? "死亡中" : w < 0 ? "读不到当前武器组" : !idle ? "连招进行中" : ab ? "增益自动补在换武器" : ws_from >= 0 ? "上一下还没换好" : "动作一直没结束"); } } }
     switch (ph) {
     case SS_REQ: { int s = atomic_load(&g_ss_slot); id = *(int32_t *)(b + 0x2d5f0c0 + 28 * s); item = *(int32_t *)(b + 0x2d5f0c0 + 28 * s + 4);
         if (atomic_load(&g_ss_kind[s]) & 4) {   // 两组都有：这一下把绑定的物品 id 临时指到当前组那个来源（原版选技能要「技能号 + 物品 id」都对上），松手后改回 | Both sets have it: for this press, temporarily point the binding's item id at the source in the current set (the original skill selection needs both "skill id + item id" to match), and change it back after release
