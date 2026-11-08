@@ -127,6 +127,7 @@ static uint8_t g_fail[NAB], g_stop[NAB]; static int g_last[8]; static uint32_t g
 static _Atomic int g_req = -1, g_busy, g_unusable = -1;
 enum { W_IDLE, W_OUT, W_CAST, W_BACK };
 static int w_ph, w_from, w_tries, w_list[6], w_n, w_life0, w_lr0[2]; static uint32_t w_t0, w_start, w_next; static uint8_t w_fail[NAB]; static uint32_t w_until[NAB]; static int w_moved;   // 换武器补的状态机（见文件头第二笔） | state machine for weapon-swap recast (see part 2 in the file header)
+int dm_autobuff_busy(void) { return w_ph != W_IDLE; }   // 换武器补正在进行（键位动作 WEAPONSWAP 这时先等，dm_actions.c） | a weapon-swap recast is in progress (the key table action WEAPONSWAP waits meanwhile, dm_actions.c)
 int dm_swapskill_wset(void); int dm_swapskill_busy(void); static int g_wait = -1, g_mana0; static uint32_t g_wait_until;   // 交服务端拍放的那个；服务端那一拍没法放（还在动作里）；在等它出现的那个、请求时的法力 | the one handed to the server tick to cast; the server could not cast on that tick (still mid-action); the one we are waiting to see appear, Mana at request time
 
 // 测试开关 DM_TEST_BUFF_LEARN=<技能号>[:<等级>][,…]（造现场用：手头的测试角色都没学名单里的技能）：给这个单位的技能链挂上这些技能并把基础等级设到这个数

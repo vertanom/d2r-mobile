@@ -104,6 +104,10 @@ int main(void) {
     CHECK(dm_padbind_step(&t, &st, DM_BTN_R, 0, 0, 0, &w) == 0 && st.acts == DM_PADACT_FREEAIM, "按住 R：acts 里有 FREEAIM，不发给游戏");
     dm_padbind_step(&t, &st, 0, 10, 0, 0, &w); CHECK(st.acts == 0, "松 R：FREEAIM 清掉");
     { char buf[256]; dm_padbind_table t2; CHECK(dm_padbind_format(&t, buf, sizeof buf) && strstr(buf, "R=FREEAIM\n") && strstr(buf, "MINUS+R=FREEAIMTOGGLE") && dm_padbind_parse(buf, &t2), "FREEAIM 写回去再读得回来"); }
+    // 换武器：宿主动作走 fired，不发给游戏；写回去认得 | Weapon swap: a host action through fired, never sent to the game; formatting reads back
+    CHECK(dm_padbind_parse("RS=WEAPONSWAP;KEY_T=WEAPONSWAP", &t) && t.out[5] == DM_PADACT_WEAPONSWAP && t.kout[dm_padbind_key_index(17)] == DM_PADACT_WEAPONSWAP, "WEAPONSWAP 认得（手柄与键盘）"); memset(&st, 0, sizeof st);
+    CHECK(dm_padbind_step(&t, &st, DM_BTN_RS, 0, 0, 0, &w) == 0 && st.fired == DM_PADACT_WEAPONSWAP, "按 R3：fired 里有 WEAPONSWAP，不发给游戏");
+    { char buf[256]; dm_padbind_table t2; CHECK(dm_padbind_format(&t, buf, sizeof buf) && strstr(buf, "RS=WEAPONSWAP\n") && dm_padbind_parse(buf, &t2) && !memcmp(&t, &t2, sizeof t), "WEAPONSWAP 写回去再读得回来"); }
     // 键盘那栏 | The keyboard column
     { dm_padbind_table a, b; char buf[1024]; int g = dm_padbind_key_index(5), f1 = dm_padbind_key_index(122);
       CHECK(g >= 0 && f1 >= 0 && id.kout[g] == DM_BTN_RS && id.kout[f1] == 0 && dm_padbind_key_index(13) < 0, "缺省：G = 按右摇杆，F1 不发；W 不进表");

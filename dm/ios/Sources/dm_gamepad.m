@@ -139,6 +139,7 @@ static void apply(void) {
       if (g_bind_st.fired) { uint64_t f = g_bind_st.fired; g_bind_st.fired = 0; void dm_ui_map_full(int on), dm_tp_request(void); int dm_ui_map_shown_full(void);
         if (f & DM_PADACT_MAPSIZE) { int on = !dm_ui_map_shown_full(); dm_ui_map_full(on); LOG("手柄键位：动作 MAPSIZE → %s", on ? "全屏地图" : "小地图"); }
         if (f & DM_PADACT_TOWNPORTAL) { dm_tp_request(); LOG("手柄键位：动作 TOWNPORTAL → 免费回城"); }
+        if (f & DM_PADACT_WEAPONSWAP) { void dm_weaponswap_request(void); dm_weaponswap_request(); LOG("手柄键位：动作 WEAPONSWAP → 换武器"); }
         { void dm_ui_map_pos_toggle(void), dm_ui_map_zoom(int d);
           if (f & DM_PADACT_MAPPOS) dm_ui_map_pos_toggle();
           if (f & DM_PADACT_MAPZOOMIN) dm_ui_map_zoom(1);
